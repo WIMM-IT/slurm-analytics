@@ -2,9 +2,10 @@
 
 Analyse Slurm sacct data with Python Pandas.
 
-# Step 1: extract `sacct` data
+## Step 1: extract `sacct` data
 
-`sacct-dump.py` is a lightweight Python script to output data from sacct:
+Run `python sacct-dump.py` in the cluster, as any user.
+This is a lightweight Python script to output data from sacct:
 - no 3rd-party dependencies
 - outputs 1 week on each call to minimise Slurm load
 
