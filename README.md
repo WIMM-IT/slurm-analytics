@@ -27,6 +27,10 @@ that saves node resource information into `Dumps/<cluster-name>/resources/`.
 
 This saves the parsed data, as Python pickled Pandas DataFrames, in local folder `Parsed/<cluster-name>/`
 
+Python requirements:
+- pandas
+- numpy
+
 ## Step 3: analyse
 
 This is the fun part.
@@ -52,7 +56,6 @@ Python requirements:
 - pandas
 - numpy
 - matplotlib
-- hashlib  # caching
 - numba  # optimise core loop
 
 The key part is function `aggregate_resource`. 
