@@ -34,6 +34,10 @@ parser.add_argument('-p', '--partition', type=str, default=None, help='Analyse j
 args = parser.parse_args()
 cluster_id = args.cluster_name
 
+if not args.resources and not args.waits and not args.users:
+  print("You did not specify an analysis")
+  quit()
+
 plot_dp = os.path.join('Plots', cluster_id)
 
 
@@ -417,20 +421,42 @@ def fn_analyse_resources(df):
     df_mem = pd.DataFrame(rss).join(req)
     for x in list(df_mem.columns):
       df_mem[f'{x} %'] = df_mem[f'{x}'] / total_gb[p]
-    # - time-series plot
+    # - absolute time-series plot
+    fig = plt.figure(figsize=(14, 8))
+    y_used = df_mem[f'{mem_col}_sum'].copy()
+    y_req = df_mem['ReqMemGB_sum'].copy()
+    unit = 'GB'
+    if y_req.max() > 1200:
+      y_used *= 0.001
+      y_req *= 0.001
+      unit = 'TB'
+      if y_req.max() > 1200:
+        y_used *= 0.001
+        y_req *= 0.001
+        unit = 'EB'
+    plt.fill_between(df_mem.index, y_used, label='Used', color='orange')
+    plt.fill_between(df_mem.index, y_req, y_used, label='Requested', color='blue')
+    # plt.plot(df_mem.index, y_req-y_used, label='Idle', color='red')  # seems to make chart noisy, not helpful
+    plt.xlabel('Date')
+    plt.ylabel(f'Memory {unit}')
+    plt.title(f'Memory utilisation - partition {p}')
+    plt.legend()
+    fn = 'resource-memory.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
+    # - % time-series plot
     fig = plt.figure(figsize=(14, 8))
     y_used = df_mem[f'{mem_col}_sum %']*100.0
     y_req = df_mem['ReqMemGB_sum %']*100.0
-    # plt.plot(df_mem.index, y_req, label='Requested', color='blue')
-    # plt.plot(df_mem.index, y_used, label='Used', color='orange')
     plt.fill_between(df_mem.index, y_used, label='Used', color='orange')
     plt.fill_between(df_mem.index, y_req, y_used, label='Requested', color='blue')
-    plt.xlabel('Time')
-    plt.ylabel(f'Memory %')
+    plt.xlabel('Date')
+    plt.ylabel(f'Memory % partition')
     plt.ylim(0, 100)
-    plt.title(f'Memory utilisation - partition {p}')
+    plt.title(f'Memory utilisation % - partition {p}')
     plt.legend()
-    fn = 'waste-memory.png'
+    fn = 'resource-memory-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
@@ -439,26 +465,37 @@ def fn_analyse_resources(df):
     df_plt['AvgCPU'] = df_plt['TotalCPU'].to_numpy() / df_plt['NCPUS'].to_numpy()
     df_plt['AvgCPULoad'] = df_plt['AvgCPU'] / df_plt['Elapsed']
     df_plt['NCPUS_real'] = df_plt['NCPUS'].astype('float') * df_plt['AvgCPULoad']
-
     req = aggregate_resource(df_plt, 'NCPUS', 'D')
     real = aggregate_resource(df_plt, 'NCPUS_real', 'D')
     df_cpu = pd.DataFrame(real).join(req)
     for x in list(df_cpu.columns):
       df_cpu[f'{x} %'] = df_cpu[f'{x}'] / total_cpus[p]
-    # - time-series plot
+    # - absolute time-series plot
+    fig = plt.figure(figsize=(14, 8))
+    y_req = df_cpu['NCPUS_sum']
+    y_used = df_cpu['NCPUS_real_sum']
+    plt.fill_between(df_mem.index, y_used, label='Used', color='orange')
+    plt.fill_between(df_mem.index, y_req, y_used, label='Requested', color='blue')
+    plt.xlabel('Date')
+    plt.ylabel(f'CPUs')
+    plt.title(f'CPU utilisation - partition {p}')
+    plt.legend()
+    fn = 'resource-cpus.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
+    # - % time-series plot
     fig = plt.figure(figsize=(14, 8))
     y_req = df_cpu['NCPUS_sum %']*100.0
     y_used = df_cpu['NCPUS_real_sum %']*100.0
-    # plt.plot(df_cpu.index, y_req, label='Requested')
-    # plt.plot(df_cpu.index, y_used, label='Used')
     plt.fill_between(df_mem.index, y_used, label='Used', color='orange')
     plt.fill_between(df_mem.index, y_req, y_used, label='Requested', color='blue')
-    plt.xlabel('Time')
-    plt.ylabel(f'CPUs %')
+    plt.xlabel('Date')
+    plt.ylabel(f'CPUs % partition')
     plt.ylim(0, 100)
     plt.title(f'CPU utilisation - partition {p}')
     plt.legend()
-    fn = 'waste-cpu.png'
+    fn = 'resource-cpus-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
@@ -471,19 +508,25 @@ def fn_analyse_resources(df):
     df_sys_waste['Mem wasted %'] = df_sys_waste['Mem wasted'] / total_gb[p]
     df_sys_waste['CPU wasted %'] = df_sys_waste['CPU wasted'] / total_cpus[p]
     fig = plt.figure(figsize=(14, 8))
-    plt.plot(df_sys_waste.index, df_sys_waste['Mem wasted %']*100.0, label='Memory')
-    plt.plot(df_sys_waste.index, df_sys_waste['CPU wasted %']*100.0, label='CPU')
+    if df_sys_waste['Mem wasted %'].mean() > df_sys_waste['CPU wasted %'].mean():
+      # Fill CPU plot, draw memory on top as line
+      plt.plot(df_sys_waste.index, df_sys_waste['Mem wasted %']*100.0, label='Memory', color='blue')
+      plt.fill_between(df_sys_waste.index, df_sys_waste['CPU wasted %']*100.0, label='CPU', color='orange')
+    else:
+      # Fill memory plot, draw CPU on top as line
+      plt.plot(df_sys_waste.index, df_sys_waste['CPU wasted %']*100.0, label='CPU', color='blue')
+      plt.fill_between(df_sys_waste.index, df_sys_waste['Mem wasted %']*100.0, label='Memory', color='orange')
     plt.xlabel('Time')
     plt.ylabel(f'System waste %')
-    plt.ylim(0, 100)
+    # plt.ylim(0, 100)
     plt.title(f'System waste - partition {p}')
     plt.legend()
-    fn = 'waste-system.png'
+    fn = 'resource-waste.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
 
-    # Analyse top users
+    # Analyse most-wasteful users
     df_plt['Elapsed seconds'] = df_plt['Elapsed'].dt.total_seconds()
     df_plt['Elapsed hours'] = df_plt['Elapsed seconds'] * (1.0 / (60*60))
     # - memory
@@ -523,7 +566,7 @@ def fn_analyse_resources(df):
       plt.ylabel(f'Memory waste %')
       plt.title(f'Memory waste - partition {p}')
       plt.legend()
-      fn = 'waste-memory-top-users.png'
+      fn = 'resource-waste-memory-user-breakdown.png'
       plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
       plt.savefig(plt_fp)
       plt.close(fig)
@@ -563,7 +606,7 @@ def fn_analyse_resources(df):
       plt.ylabel(f'CPUs waste %')
       plt.legend()
       plt.title(f'CPUs waste - partition {p}')
-      fn = 'waste-cpus-top-users.png'
+      fn = 'resource-waste-cpus-user-breakdown.png'
       plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
       plt.savefig(plt_fp)
       plt.close(fig)
