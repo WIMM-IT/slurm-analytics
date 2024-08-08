@@ -937,6 +937,7 @@ def fn_analyse_users(df):
       df_plt_p = df_plt[df_plt['Partition']==p]
       if df_plt_p.empty:
         continue
+    df_plt_p = df_plt_p.drop('Partition', axis=1)
     print(f"Analysing users in partition '{p}'")
 
     os.makedirs(plot_dp, exist_ok=True)
@@ -947,6 +948,14 @@ def fn_analyse_users(df):
     users_sum = df_plt_p.groupby('User').sum()
 
     users_sum = users_sum.sort_values('GB hours', ascending=True)
+    # discard users using very little, otherwise plot too crowded
+    if len(users_sum) > 20:
+      threshold = 0.01
+      f_light = (users_sum['CPU hours'] < (users_sum['CPU hours'].max()*threshold))
+      f_light = f_light & (users_sum['GB hours'] < (users_sum['GB hours'].max()*threshold))
+      f_light = f_light & (users_sum['Elapsed hours'] < (users_sum['Elapsed hours'].max()*threshold))
+      if f_light.any():
+        users_sum = users_sum[~f_light]
     fig, ax = plt.subplots(figsize=(10, 12))
     indices = range(users_sum.shape[0])  # y-locations for the groups
     bar_height = 0.35
@@ -962,9 +971,9 @@ def fn_analyse_users(df):
     ax.set_title(f'Users resource use - partition {p}')
     ax.set_yticks(indices)
     ax.set_yticklabels(users_sum.index)
-    ax.legend()
-    # plt_fp = os.path.join(plot_dp, f'users-resources-{p.upper()}.png')
-    fn = 'users-resources.png'
+    # ax.legend(ncol=2, loc='lower right')
+    ax.legend(ncol=2, loc='center')
+    fn = 'users-summary.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
@@ -972,18 +981,19 @@ def fn_analyse_users(df):
     weekly_sum = df_plt_p.groupby('User').resample('W').sum().drop('User', axis=1)
     weekly_sum['CPUxGB hours'] = weekly_sum['GB hours'] * weekly_sum['CPU hours']
     weekly_sum['CPUxTB hours'] = weekly_sum['CPUxGB hours'] * 0.001
+    weekly_sum['TB hours'] = weekly_sum['GB hours'] * 0.001
     weekly_count = df_plt_p[['User']].groupby('User').resample('W').count().rename(columns={'User':'NJobs'})
     weekly_sum = weekly_sum.join(weekly_count)
 
     # Get most active users during recent weeks
-    # period = pd.Timedelta(6, 'W')
-    period = pd.Timedelta(12, 'W')
+    w = args.weeks or 12  # default 12 weeks
+    period = pd.Timedelta(w, 'W')
     d_recent = weekly_sum.swaplevel(0, 1).sort_index().loc[ (pd.Timestamp.now() - period).date().isoformat() : ].swaplevel(0, 1)
     n_active_users = len(d_recent)
 
     plot_max_active_users = min(8, n_active_users)
 
-    for dc in ['CPU hours', 'CPUxTB hours', 'NJobs', 'Elapsed hours']:
+    for dc in ['CPU hours', 'TB hours', 'CPUxTB hours', 'NJobs', 'Elapsed hours']:
       active_users = d_recent[[dc]].groupby('User').sum().sort_values(dc).index[-plot_max_active_users:]
       plot_max_active_users = min(8, len(active_users))
 
@@ -991,7 +1001,6 @@ def fn_analyse_users(df):
       if len(active_users) > 1:
         biggest_user = active_users[-1]
         dc_agg = d_recent[dc].groupby('User').sum()
-        # print(dc_agg)
         biggest_user_ratio = dc_agg.loc[active_users[-1]] / dc_agg.loc[active_users[-2]]
         if biggest_user_ratio > 20:
           set_yaxis_log = True
@@ -1025,15 +1034,13 @@ def fn_analyse_users(df):
         ax.set_xticks(np.arange(len(weeks)) + bar_width * (plot_max_active_users / 2 - 0.5))
         ax.set_xticklabels([week.strftime('%Y-%m-%d') for week in weeks], rotation=45)
       plt.legend(title='User', loc='upper left', bbox_to_anchor=(1,1))
-      # plt.show() ; quit()
       plt.grid(axis='y')
-      plt.title(f'Active users, metric={dc} - partition {p}')
-      # plt_fp = os.path.join(plot_dp, f'users-active-{dc}-{p.upper()}.png')
+      plt.title(f'Active users, metric={dc}, last {w} weeks - partition {p}')
       fn = f'users-active-{dc}.png'
       plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
       plt.savefig(plt_fp)
       plt.close(fig)
-    
+
 
 if args.resources:
   fn_analyse_resources(df)
