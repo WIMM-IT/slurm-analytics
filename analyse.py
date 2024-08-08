@@ -25,24 +25,24 @@ fig_dims = (14, 8)
 
 import argparse
 parser = argparse.ArgumentParser(description="Analyse sacct data, generating plots.")
-parser.add_argument('-n', '--cluster-name', type=str, required=True, help='Cluster name')
-parser.add_argument('-r', '--resources', action='store_true', help='Analyse resource use')
-parser.add_argument('-w', '--waits',     action='store_true', help='Analyse wait times')  # Working on a metric for "queue fairness"
-parser.add_argument('-u', '--users',     action='store_true', help='Analyse users')
-parser.add_argument('-t', '--weeks', type=int, default=None, help='Analyse just last N weeks')
-parser.add_argument('-p', '--partition', type=str, default=None, help='Analyse just this Slurm partition')
+parser.add_argument('cluster_name', type=str, help='Cluster name')
+parser.add_argument('-r', '--resources',  action='store_true', help='Analyse resource use')
+parser.add_argument('-w', '--waits',      action='store_true', help='Analyse wait times')  # Working on a metric for "queue fairness"
+parser.add_argument('-u', '--users',      action='store_true', help='Analyse users')
+parser.add_argument('-p', '--partition',  type=str, default=None, help='Analyse just this Slurm partition')
+parser.add_argument('-n', '--weeks',      type=int, default=None, help='Analyse just last N weeks')
+parser.add_argument('-t', '--resolution', type=str, default='D', choices=['H', 'D', 'W'], help='Aggregation resolution time period, default: %(default)s')
+parser.add_argument('-d', '--plots-dir', type=str, default='Plots', help='Save plots here instead of "Plots/"')
 args = parser.parse_args()
 cluster_id = args.cluster_name
+plot_dp = os.path.join(args.plots_dir, cluster_id)
 
 if not args.resources and not args.waits and not args.users:
   print("You did not specify an analysis")
   quit()
 
-plot_dp = os.path.join('Plots', cluster_id)
-
 
 import json
-# with open(os.path.join('Dumps', cluster_id, 'resources', 'partitions-2024-07-25.json')) as f:
 pattern = os.path.join('Dumps', cluster_id, 'resources', 'partitions-????-??-??.json')
 with open(sorted(glob.glob(pattern))[-1]) as f:
   resources = json.load(f)
@@ -307,8 +307,6 @@ def plot_time_series_violins(df, x, s, period='W', yscaling=None):
   if df.empty:
     raise Exception('empty')
 
-  # Plot sqrt of data, to prevent big values distorting chart.
-  # Better than log scaling.
   df_plt = df[[x, s]].copy()
   df_plt = df_plt[df_plt[x] > 0.0]
   if df_plt.empty:
@@ -405,7 +403,10 @@ def fn_analyse_resources(df):
       df_plt = df[df['Partition']==p].copy()
       if df_plt.empty:
         continue
-    print(f"Analysing resource use in partition '{p}'")
+    if p == '*':
+      print(f"Analysing resource use across all partitions")
+    else:
+      print(f"Analysing resource use in partition '{p}'")
 
     os.makedirs(plot_dp, exist_ok=True)
     if p != '*':
@@ -413,8 +414,8 @@ def fn_analyse_resources(df):
 
     # Memory first
     mem_col = 'MaxRSS GB'
-    rss = aggregate_resource(df_plt, mem_col, 'D')
-    req = aggregate_resource(df_plt, 'ReqMemGB', 'D')
+    rss = aggregate_resource(df_plt, mem_col, args.resolution)
+    req = aggregate_resource(df_plt, 'ReqMemGB', args.resolution)
     df_mem = pd.DataFrame(rss).join(req)
     for x in list(df_mem.columns):
       df_mem[f'{x} %'] = df_mem[f'{x}'] / total_gb[p]
@@ -433,7 +434,6 @@ def fn_analyse_resources(df):
         unit = 'EB'
     plt.fill_between(df_mem.index, y_used, label='Used', color='orange')
     plt.fill_between(df_mem.index, y_req, y_used, label='Requested', color='blue')
-    # plt.plot(df_mem.index, y_req-y_used, label='Idle', color='red')  # seems to make chart noisy, not helpful
     plt.xlabel('Date')
     plt.ylabel(f'Memory {unit}')
     plt.title(f'Memory utilisation - partition {p}')
@@ -462,8 +462,8 @@ def fn_analyse_resources(df):
     df_plt['AvgCPU'] = df_plt['TotalCPU'].to_numpy() / df_plt['NCPUS'].to_numpy()
     df_plt['AvgCPULoad'] = df_plt['AvgCPU'] / df_plt['Elapsed']
     df_plt['NCPUS_real'] = df_plt['NCPUS'].astype('float') * df_plt['AvgCPULoad']
-    req = aggregate_resource(df_plt, 'NCPUS', 'D')
-    real = aggregate_resource(df_plt, 'NCPUS_real', 'D')
+    req = aggregate_resource(df_plt, 'NCPUS', args.resolution)
+    real = aggregate_resource(df_plt, 'NCPUS_real', args.resolution)
     df_cpu = pd.DataFrame(real).join(req)
     for x in list(df_cpu.columns):
       df_cpu[f'{x} %'] = df_cpu[f'{x}'] / total_cpus[p]
@@ -546,8 +546,8 @@ def fn_analyse_resources(df):
       for u in top_wasteful_users:
         dfu = df_plt[df_plt['User']==u].copy()
 
-        rss = aggregate_resource(dfu, mem_col, 'D')
-        req = aggregate_resource(dfu, 'ReqMemGB', 'D')
+        rss = aggregate_resource(dfu, mem_col, args.resolution)
+        req = aggregate_resource(dfu, 'ReqMemGB', args.resolution)
         dfu_mem = pd.DataFrame(rss).join(req)
         dfu_mem['Mem wasted'] = dfu_mem['ReqMemGB_sum'] - dfu_mem[f'{mem_col}_sum']
         dfu_mem['Mem wasted'] = dfu_mem['Mem wasted'].clip(lower=0.0)
@@ -586,8 +586,8 @@ def fn_analyse_resources(df):
       for u in top_wasteful_users:
         dfu = df_plt[df_plt['User']==u].copy()
 
-        ncpus_req = aggregate_resource(dfu, 'NCPUS', 'D')
-        ncpus_real = aggregate_resource(dfu, 'NCPUS_real', 'D')
+        ncpus_req = aggregate_resource(dfu, 'NCPUS', args.resolution)
+        ncpus_real = aggregate_resource(dfu, 'NCPUS_real', args.resolution)
         dfu_cpu = pd.DataFrame(ncpus_req).join(ncpus_real)
         dfu_cpu['CPUs wasted'] = dfu_cpu['NCPUS_sum'] - dfu_cpu['NCPUS_real_sum']
         dfu_cpu['CPUs wasted'] = dfu_cpu['CPUs wasted'].clip(lower=0.0)
@@ -640,10 +640,6 @@ def fn_analyse_waiting(df):
 
   df['WaitTime % elapsed'] = df['WaitTime hours'] / df['Elapsed hours']
   df['WaitTime % limit'] = df['WaitTime hours'] / df['Timelimit hours']
-  # f = (df['WaitTime %'] > 2.0)
-  # if f.any:
-  #   print(df[f][['NCPUS', 'ReqMemGB', 'Reason', 'State', 'User', 'Partition', 'Elapsed minutes']])
-  #   raise Exception('review')
 
   df['TotalCPU seconds'] = df['TotalCPU'].dt.total_seconds()
   df['TotalCPU hours'] = df['TotalCPU seconds'] * (1.0 / (60*60))
@@ -657,25 +653,21 @@ def fn_analyse_waiting(df):
 
   df_wait = df[['Submit', 'Start', 'Partition', 'WaitTime hours', 'WaitTime % limit', 'NCPUS', 'ReqMemGB', 'TotalCPU hours', 'Elapsed hours']].copy()
 
-  # # Exclude jobs that requested near-entire nodes, because they will have long wait times
-  # df_wait = df_wait[df_wait['ReqMemGB'] < avg_memory*0.8]
-  # df_wait = df_wait[df_wait['NCPUS'] < avg_cpus*0.8]
-
   df_wait['TB*CPU'] = df_wait['ReqMemGB'] * 0.001 * df_wait['NCPUS']
   rcol = 'TB*CPU'
 
-  # df_plt = df_wait.copy().set_index('Submit')
-  # df_plt['Load'] = df_plt['ReqMemGB'] * df_plt['TotalCPU hours'] * df_plt['Elapsed hours']
-  # df_plt = df_plt.drop(['ReqMemGB', 'TotalCPU hours', 'Elapsed hours'], axis=1)
   # Time-series for each partition
-  # for p in partitions:
   for p in [args.partition] if args.partition else partitions:
-    dfp = df_wait[df_wait['Partition']==p].copy()
+    if p == '*':
+      print(f"Analysing wait time across all partitions")
+      dfp = df_wait.copy()
+    else:
+      dfp = df_wait[df_wait['Partition']==p].copy()
     dfp = dfp[dfp['WaitTime hours']>0]
     dfp = dfp[dfp['WaitTime hours']<48]
     if dfp.empty:
       continue
-    print(f"Analysing wait time in partition '{p}'")
+      print(f"Analysing wait time in partition '{p}'")
 
     os.makedirs(plot_dp, exist_ok=True)
     if p != '*':
@@ -719,77 +711,77 @@ def fn_analyse_waiting(df):
 
 
     # Plot of submit time vs wait
-    x = dfp[['Submit', 'WaitTime hours']].copy()
-    # f='4H'
-    f='1D'
-    x = x.groupby(pd.Grouper(key='Submit', freq=f)).describe()['WaitTime hours']
-    f_na = x['mean'].isna()
-    if f_na.any():
-      x = x[~f_na]
-    # - Interquartile plot
-    x = x[['mean', '25%', '75%', 'max']]
-    mean_values = x['mean']
-    q1_values = x['25%']
-    q3_values = x['75%']
-    # - calculate the interquartile range
-    lower_error = np.clip(mean_values - q1_values, 0, None)
-    upper_error = np.clip(q3_values - mean_values, 0, None)
-    asymmetric_error = [lower_error, upper_error]
-    # - create the plot
-    fig = plt.figure(figsize=(14, 6))
-    plt.errorbar(x.index, mean_values, yerr=asymmetric_error, fmt='none', label='IQR', capsize=5, color='blue')
-    plt.scatter(x.index, mean_values, marker='_', color='red', label='Mean', zorder=5)
-    # plt.scatter(x.index, x['max'], marker='_', color='blue', label='Max')
-    plt.xlabel('Submit time')
-    plt.ylabel('Wait duration (hours)')
-    plt.title(f'Submit time vs wait time - partition {p}')
-    plt.legend()
-    # plt.show() ; quit()
-    # plt_fp = os.path.join(plot_dp, f'submit-vs-wait-{p.upper()}.png')
-    fn = 'wait-vs-submit.png'
-    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
-    plt.savefig(plt_fp)
-    plt.close(fig)
+    # Update: this plot redundant, the violin plot above much better
+    # x = dfp[['Submit', 'WaitTime hours']].copy()
+    # # f='4H'
+    # f='1D'
+    # x = x.groupby(pd.Grouper(key='Submit', freq=f)).describe()['WaitTime hours']
+    # f_na = x['mean'].isna()
+    # if f_na.any():
+    #   x = x[~f_na]
+    # # - Interquartile plot
+    # x = x[['mean', '25%', '75%', 'max']]
+    # mean_values = x['mean']
+    # q1_values = x['25%']
+    # q3_values = x['75%']
+    # # - calculate the interquartile range
+    # lower_error = np.clip(mean_values - q1_values, 0, None)
+    # upper_error = np.clip(q3_values - mean_values, 0, None)
+    # asymmetric_error = [lower_error, upper_error]
+    # # - create the plot
+    # fig = plt.figure(figsize=(14, 6))
+    # plt.errorbar(x.index, mean_values, yerr=asymmetric_error, fmt='none', label='IQR', capsize=5, color='blue')
+    # plt.scatter(x.index, mean_values, marker='_', color='red', label='Mean', zorder=5)
+    # # plt.scatter(x.index, x['max'], marker='_', color='blue', label='Max')
+    # plt.xlabel('Submit time')
+    # plt.ylabel('Wait duration (hours)')
+    # plt.title(f'Submit time vs wait time - partition {p}')
+    # plt.legend()
+    # # plt.show() ; quit()
+    # # plt_fp = os.path.join(plot_dp, f'submit-vs-wait-{p.upper()}.png')
+    # fn = 'wait-vs-submit.png'
+    # plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    # plt.savefig(plt_fp)
+    # plt.close(fig)
 
 
     # Plot of resources waiting in queue
     df_wait2 = dfp.rename(columns={'Start':'End'}).rename(columns={'Submit':'Start'})
     # - CPUS
-    ncpus_waiting = aggregate_resource(df_wait2, 'NCPUS', period='D')
+    ncpus_waiting = aggregate_resource(df_wait2, 'NCPUS', period=args.resolution)
     ncpus_waiting = pd.DataFrame(ncpus_waiting)
     for x in list(ncpus_waiting.columns):
       ncpus_waiting[f'{x} %'] = ncpus_waiting[f'{x}'] / total_cpus['*']
     # - time-series plot
     fig = plt.figure(figsize=(14, 8))
-    # plt.plot(ncpus_waiting.index, ncpus_waiting['NCPUS_sum %']*100.0, label='Requested')
-    # plt.ylabel(f'CPUs %')
-    # plt.ylim(0, 200)
-    plt.plot(ncpus_waiting.index, ncpus_waiting['NCPUS_sum %'], label='Requested', color='blue')
-    plt.fill_between(ncpus_waiting.index, ncpus_waiting['NCPUS_sum %'], alpha=0.3, color='blue')
-    plt.ylabel(f'CPUs x')
-    plt.ylim(0, 2)
-    # plt.yscale('log')
-    plt.xlabel('Time')
-    plt.title(f'CPUs waiting % - partition {p}')
+    # Plot normal % chart
+    y = ncpus_waiting['NCPUS_sum %']*100.0
+    # plt.plot(ncpus_waiting.index, y, label='Requested')
+    plt.plot(ncpus_waiting.index, y, label='Requested', color='blue')
+    plt.fill_between(ncpus_waiting.index, y, alpha=0.3, color='blue')
+    plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
+    plt.ylabel(f'CPUs % partition')
+    plt.title(f'CPUs waiting % partition "{p}" resources')
+    plt.xlabel('Date')
     plt.legend()
     fn = 'waiting-cpus-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
     # - memory
-    mem_waiting = aggregate_resource(df_wait2, 'ReqMemGB', period='D')
+    mem_waiting = aggregate_resource(df_wait2, 'ReqMemGB', period=args.resolution)
     mem_waiting = pd.DataFrame(mem_waiting)
     for x in list(mem_waiting.columns):
       mem_waiting[f'{x} %'] = mem_waiting[f'{x}'] / total_gb['*']
     # - time-series plot
     fig = plt.figure(figsize=(14, 8))
-    plt.plot(mem_waiting.index, mem_waiting['ReqMemGB_sum %'], label='Requested', color='orange')
-    plt.fill_between(mem_waiting.index, mem_waiting['ReqMemGB_sum %'], alpha=0.3, color='orange')
-    plt.ylabel(f'Mem x')
-    plt.ylim(0, 2)
-    # plt.yscale('log')
-    plt.xlabel('Time')
-    plt.title(f'Memory waiting % - partition {p}')
+    y = mem_waiting['ReqMemGB_sum %']*100.0
+    plt.plot(mem_waiting.index, y, label='Requested', color='orange')
+    plt.fill_between(mem_waiting.index, y, alpha=0.3, color='orange')
+    plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
+    plt.ylabel(f'Memory waiting % partition')
+    plt.title(f'Memory waiting % partition "{p}" resources')
+    plt.xlabel('Date')
     plt.legend()
     fn = 'waiting-mem-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
@@ -798,21 +790,14 @@ def fn_analyse_waiting(df):
     # - combine
     cpus_mem_waiting = ncpus_waiting.join(mem_waiting)
     fig = plt.figure(figsize=(14, 8))
-    # plt.plot(cpus_mem_waiting.index, cpus_mem_waiting['NCPUS_sum %']*100.0, label='CPU')
-    # plt.plot(cpus_mem_waiting.index, cpus_mem_waiting['ReqMemGB_sum %']*100.0, label='Memory')
-    # plt.ylabel(f'% of system waiting in queue')
-    # plt.ylim(0, 400)
-    y_cpu = cpus_mem_waiting['NCPUS_sum %']
-    y_mem = cpus_mem_waiting['ReqMemGB_sum %']
+    y_cpu = cpus_mem_waiting['NCPUS_sum %']*100.0
+    y_mem = cpus_mem_waiting['ReqMemGB_sum %']*100.0
     plt.plot(cpus_mem_waiting.index, y_mem, label='Memory', color='orange')
-    # plt.fill_between(cpus_mem_waiting.index, y_mem, color='orange')
     plt.plot(cpus_mem_waiting.index, y_cpu, label='CPU', color='blue')
-    # plt.fill_between(cpus_mem_waiting.index, y_cpu, color='blue')
-    plt.ylabel(f'System x')
-    plt.ylim(0, 2)
-    # plt.yscale('log')
-    plt.xlabel('Time')
-    plt.title(f'Resources waiting % - partition {p}')
+    plt.ylabel(f'Resources waiting % partition')
+    plt.ylim(0, min(400, max(y_cpu.max(), y_mem.max())))  # cap otherwise chart is not readable
+    plt.xlabel('Date')
+    plt.title(f'Resources waiting % partition "{p}" resources')
     plt.legend()
     fn = 'waiting-cpus-mem-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
@@ -1007,7 +992,10 @@ def fn_analyse_users(df):
       if df_plt_p.empty:
         continue
     df_plt_p = df_plt_p.drop('Partition', axis=1)
-    print(f"Analysing users in partition '{p}'")
+    if p == '*':
+      print(f"Analysing users across all partitions")
+    else:
+      print(f"Analysing users in partition '{p}'")
 
     os.makedirs(plot_dp, exist_ok=True)
     if p != '*':
