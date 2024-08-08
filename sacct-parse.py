@@ -111,7 +111,14 @@ if len(input_fps) > 0:
                 part_remaps[badp] = candidiates[0]
                 df.loc[df['Partition']==badp, 'Partition'] = part_remaps[badp]
             else:
-              raise Exception(f'Have multiple candiates for bad partition {badp}: {candidiates}')
+              # Pick candidate with most resources.
+              newp = candidiates[0]
+              for c in candidiates[1:]:
+                if resources[newp]['MaxCPUsPerNode']*len(resources[newp]['Nodes']) > \
+                  resources[c]['MaxCPUsPerNode']*len(resources[c]['Nodes']):
+                  newp = c
+              part_remaps[badp] = newp
+              df.loc[df['Partition']==badp, 'Partition'] = part_remaps[badp]
       f = ~df['Partition'].isin(partitions)
       if f.any():
         raise Exception(f'Bad partitions still present: {df["Partition"][f].unique()}')
