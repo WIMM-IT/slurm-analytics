@@ -302,10 +302,7 @@ def plot_skewed_binned_sum(df, x, y, nbins=50):
   return fig, ax
 
 
-def plot_time_series_violins(df, x, s):#, logx=False):
-  period = 'W'
-  fig, ax = plt.subplots(figsize=(24, 8))
-
+def plot_time_series_violins(df, x, s, period='W', yscaling=None):
   if df.empty:
     raise Exception('empty')
 
@@ -316,55 +313,85 @@ def plot_time_series_violins(df, x, s):#, logx=False):
   if df_plt.empty:
     print(df[[x, s]])
     raise Exception(f'No non-zero data to plot from column "{x}"')
-  # if logx:
-  #   df_plt[x] = np.log(df_plt[x])
-  x2 = x + ' sqrt'
-  df_plt[x2] = np.sqrt(df_plt[x])
-  df_plt = df_plt.resample(period).apply(list)
-  df_plt = df_plt[df_plt[x2].apply(lambda x: len(x) > 1)]
 
-  # Use column 's' to scale width of violins, so
-  # area is proportional to e.g. total system load during period.
-  sizes = [np.sum(l) for l in df_plt[s]]
-  s2 = s + ' normalised'
-  df_plt[s2] = np.divide(sizes, np.max(sizes))
-  iqrs = []
-  for i in range(df_plt.shape[0]):
-    l = df_plt[x2].iloc[i]
-    q1, q3 = np.percentile(l, [25, 75])
-    iqr = q3 - q1
-    if iqr == 0.0:
-      # default to 1 second
-      iqr = 1/3600
-    iqrs.append(iqr)
-  widths = np.divide(sizes, iqrs)
-  widths_normalised = widths / np.max(widths)
-  df_plt['Widths normalised'] = widths_normalised
+  if yscaling:
+    if yscaling == 'log':
+      x2 = x + ' log'
+      df_plt[x2] = np.log(df_plt[x])
+    else:
+      x2 = x + ' sqrt'
+      df_plt[x2] = np.sqrt(df_plt[x])
+  else:
+    x2 = x
+
+  df_plt = df_plt.resample(period).apply(list)
+  df_plt = df_plt[df_plt[x].apply(lambda z: len(z) > 1)]
 
   # Create plot
+  fig, ax = plt.subplots(figsize=(24, 8))
+  
+  # Use column 's' to scale width of violins, so
+  # area is proportional to e.g. total system load during period.
+  df_plt[s] = [np.sum(l) for l in df_plt[s]]
+  df_plt[s] = df_plt[s] / df_plt[s].max()  # normalise 's'
+
+  iqrs = []
+  global_min = None
+  for i in range(df_plt.shape[0]):
+    l = df_plt[x2].iloc[i]
+    l = sorted(l)
+    q1, q3 = np.percentile(l, [15, 100-15])
+    iqr = q3 - q1
+    if iqr == 0.0:
+      # Default to minimum X value
+      if global_min is None:
+        global_min = min([min(df_plt[x2].iloc[j]) for j in range(len(df_plt))])
+      iqr = global_min
+    iqrs.append(iqr)
+  widths = np.divide(df_plt[s], iqrs)
+  widths = widths / np.max(widths)  # normalise
+  df_plt['Widths'] = widths
+
+  # - calculate max width
+  positions = []
   for i, (chunk, data) in enumerate(df_plt.iterrows()):
-    times = data[x2]
-    load = data[s2]
-    sqrt_values = np.hstack(times)
+    pos = mdates.date2num(chunk) + 2.0  # convert date to epoch for X-axis
+    positions.append(pos)
+  diffs = np.diff(sorted(positions))
+  max_width = np.min(diffs) if len(diffs) > 0 else 1
+  # - plot
+  for i, (chunk, data) in enumerate(df_plt.iterrows()):
+    load = data[s]
     if load < 0.00001:
       continue
-    width = data['Widths normalised']
-    # proportional_width = width * 10
-    # proportional_width = width * 20
-    proportional_width = width
-    pos = mdates.date2num(chunk) + 2.0
-    vp = ax.violinplot(sqrt_values, positions=[pos], widths=proportional_width)
+    pos = positions[i]
+    times = data[x2]
+    values = np.hstack(times)
+    #
+    width = data['Widths']
+    proportional_width = width * max_width
+    vp = ax.violinplot(values, positions=[pos], widths=proportional_width)
     for body in vp['bodies']:
       body.set_alpha(1)
     vp['cbars'].set_alpha(0.0)
     for k in ['cmins', 'cmaxes']:
       vp[k].set_alpha(0.3)
+
+  # Convert X-axis epochs to date strings
   ax.xaxis.set_major_locator(mdates.WeekdayLocator())
   ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
   plt.xticks(rotation=45)
-  yticks = plt.yticks()[0]
-  original_values = np.square(yticks)
-  plt.yticks(yticks, np.round(original_values, 3))
+
+  if yscaling:
+    yticks = plt.yticks()[0]
+    if yscaling == 'log':
+      original_values = np.exp(yticks)
+    else:
+      original_values = np.square(yticks)
+      ax.set_ylim([0, None])
+    plt.yticks(yticks, np.round(original_values, 1))
+    if yscaling == 'sqrt':
+      ax.set_ylim([0, None])
 
   return fig, ax
 
@@ -559,6 +586,7 @@ def fn_analyse_waiting(df):
 
   df['Timelimit seconds'] = df['Timelimit'].dt.total_seconds()
   df['Timelimit days'] = df['Timelimit seconds'] * (1.0 / (24*60*60))
+  df['Timelimit hours'] = df['Timelimit seconds'] * (1.0 / (60*60))
 
   df['WaitTime'] = df['Start'] - df['Submit']
   df['WaitTime seconds'] = df['WaitTime'].dt.total_seconds()
@@ -570,7 +598,8 @@ def fn_analyse_waiting(df):
   df['Elapsed hours'] = df['Elapsed seconds'] * (1.0 / (60*60))
   df['Elapsed minutes'] = df['Elapsed hours']*60
 
-  df['WaitTime %'] = df['WaitTime hours'] / df['Elapsed hours']
+  df['WaitTime % elapsed'] = df['WaitTime hours'] / df['Elapsed hours']
+  df['WaitTime % limit'] = df['WaitTime hours'] / df['Timelimit hours']
   # f = (df['WaitTime %'] > 2.0)
   # if f.any:
   #   print(df[f][['NCPUS', 'ReqMemGB', 'Reason', 'State', 'User', 'Partition', 'Elapsed minutes']])
@@ -586,7 +615,7 @@ def fn_analyse_waiting(df):
   df['ReqMem TB hours'] = df['ReqMem TB hours'].round(1)
 
 
-  df_wait = df[['Submit', 'Start', 'Partition', 'WaitTime hours', 'WaitTime %', 'NCPUS', 'ReqMemGB', 'TotalCPU hours', 'Elapsed hours']].copy()
+  df_wait = df[['Submit', 'Start', 'Partition', 'WaitTime hours', 'WaitTime % limit', 'NCPUS', 'ReqMemGB', 'TotalCPU hours', 'Elapsed hours']].copy()
 
   # # Exclude jobs that requested near-entire nodes, because they will have long wait times
   # df_wait = df_wait[df_wait['ReqMemGB'] < avg_memory*0.8]
@@ -612,33 +641,38 @@ def fn_analyse_waiting(df):
     if p != '*':
       os.makedirs(os.path.join(plot_dp, p.upper()), exist_ok=True)
 
-    dfp['Load'] = dfp['ReqMemGB'] * dfp['TotalCPU hours'] * dfp['Elapsed hours']
+    load_metric = 'TotalCPU hours'
     dfps = dfp.set_index('Submit')
 
     # Violin plot of binned wait times
-    df_plot = dfp[['Submit', 'WaitTime hours', 'WaitTime %', 'Load']].copy().set_index('Submit')
+    df_plot = dfp[['Submit', 'WaitTime hours', 'WaitTime % limit', load_metric]].copy().set_index('Submit')
+    df_plot['WaitTime % limit'] = 100*df_plot['WaitTime % limit']
     # Absolute wait time
-    fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', 'Load')
+    if df_plot['WaitTime hours'].max() > 40:
+      fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric, yscaling='log')
+    elif df_plot['WaitTime hours'].max() > 40:
+      fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric, yscaling='sqrt')
+    else:  
+      fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric)
     plt.xlabel('Week end')
     plt.ylabel('Wait time (hours)')
-    plt.title(f'Wait time distributions trend (area ≈ load) - partition {p}')
-    fn = 'wait-distribution-trend.png'
+    plt.title(f'Wait time, weekly distributions, area ≈ {load_metric}, partition {p}')
+    fn = 'wait-distribution-weekly.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
-    # Relative wait time (% of run time)
+    #
+    # Relative wait time (% of time-limit)
+    if df_plot['WaitTime % limit'].max() > 3000:
+      # Need more aggressive Y scaling
+      fig, ag = plot_time_series_violins(df_plot, 'WaitTime % limit', load_metric, yscaling='log')
+    else:
+      fig, ag = plot_time_series_violins(df_plot, 'WaitTime % limit', load_metric, yscaling='sqrt')
     plt.xlabel('Week end')
+    plt.ylabel('Wait time % time limit')
     #
-    fig, ag = plot_time_series_violins(df_plot, 'WaitTime %', 'Load')
-    plt.ylabel('Wait time % runtime')
-    #
-    # df_plot['WaitTime % (log)'] = np.log(df_plot['WaitTime %'])
-    # fig, ag = plot_time_series_violins(df_plot, 'WaitTime % (log)', 'Load')
-    # fig, ag = plot_time_series_violins(df_plot, 'WaitTime %', 'Load', logx=True)
-    # plt.ylabel('Wait time % runtime (log)')
-    #
-    plt.title(f'Wait time distributions trend (area ≈ load) - partition {p}')
-    fn = 'wait-distribution-trend-pct.png'
+    plt.title(f'Wait time % job limit, weekly distributions, area ≈ {load_metric}, partition {p}')
+    fn = 'wait-distribution-weekly-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
@@ -698,7 +732,6 @@ def fn_analyse_waiting(df):
     plt.xlabel('Time')
     plt.title(f'CPUs waiting % - partition {p}')
     plt.legend()
-    # plt_fp = os.path.join(plot_dp, f'waiting-cpus-pct-{p.upper()}.png')
     fn = 'waiting-cpus-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
@@ -710,9 +743,6 @@ def fn_analyse_waiting(df):
       mem_waiting[f'{x} %'] = mem_waiting[f'{x}'] / total_gb['*']
     # - time-series plot
     fig = plt.figure(figsize=(14, 8))
-    # plt.plot(mem_waiting.index, mem_waiting['ReqMemGB_sum %']*100.0, label='Requested')
-    # plt.ylabel(f'Mem %')
-    # plt.ylim(0, 200)
     plt.plot(mem_waiting.index, mem_waiting['ReqMemGB_sum %'], label='Requested', color='orange')
     plt.fill_between(mem_waiting.index, mem_waiting['ReqMemGB_sum %'], alpha=0.3, color='orange')
     plt.ylabel(f'Mem x')
@@ -721,7 +751,6 @@ def fn_analyse_waiting(df):
     plt.xlabel('Time')
     plt.title(f'Memory waiting % - partition {p}')
     plt.legend()
-    # plt_fp = os.path.join(plot_dp, f'waiting-mem-pct-{p.upper()}.png')
     fn = 'waiting-mem-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
@@ -745,7 +774,6 @@ def fn_analyse_waiting(df):
     plt.xlabel('Time')
     plt.title(f'Resources waiting % - partition {p}')
     plt.legend()
-    # plt_fp = os.path.join(plot_dp, f'waiting-cpus-mem-pct-{p.upper()}.png')
     fn = 'waiting-cpus-mem-pct.png'
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
@@ -795,10 +823,11 @@ def fn_analyse_waiting(df):
   plt.close(fig)
   ################################################################
 
+  return
+
   ################################################################
   ## THESE PLOTS PROBABLY NOT USEFUL
   ################################################################
-  return
   # Time-series across all partitions
   df_plt = df[['Submit', 'Partition', 'WaitTime hours', 'ReqMemGB', 'TotalCPU hours', 'Elapsed hours']].copy()
   df_plt = df_plt.set_index('Submit')
