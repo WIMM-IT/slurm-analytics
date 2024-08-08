@@ -92,13 +92,6 @@ df = df[df['Elapsed'] > pd.Timedelta(0)]
 df = df.drop('CPUTimeRAW', axis=1, errors='ignore')  # pointless because CPUTimeRaw * NCPUS = Elapsed
 
 
-for c in ['NCPUS', 'ReqMemGB', 'MaxRSS GB']:
-  f_nan = df[c].isna()
-  if f_nan.any():
-    print(df[f_nan][['Start', 'End', 'State', 'NCPUS', 'ReqMemGB', 'MaxRSS GB']])
-    raise Exception(f'NaNs detected in column "{c}" of parsed df')
-
-
 # This is the critical magic function, for combining all jobs in df
 # to a single time-series.
 def aggregate_resource(df, x, period='H', cache=True):
@@ -124,6 +117,10 @@ def aggregate_resource(df, x, period='H', cache=True):
         # Reuse cache
         with open(cache_path, 'rb') as f:
             return pkl.load(f)
+
+  fna = df[x].isna()
+  if fna.any():
+    df = df[~fna]
 
   # print(f"Aggregating '{x}' on '{period}' period")
   if period == 'H':

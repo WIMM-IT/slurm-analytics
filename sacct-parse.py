@@ -25,7 +25,8 @@ df_all = None
 input_fps = []
 pattern = f'Dumps/{cluster_id}/sacct/*.csv'
 for input_fp in glob.glob(pattern):
-  input_fps.append((input_fp, os.path.getmtime(input_fp)))
+  input_fps.append(input_fp)
+input_fps = sorted(input_fps, reverse=True)  # parse newest first, in case user aborts early
 if len(input_fps) == 0:
   print(f"No sacct files detected for cluster named '{cluster_id}'")
   quit()
@@ -51,9 +52,8 @@ else:
 
 
 if len(input_fps) > 0:
-  part_remaps = {'gpu-ll-test': 'gpu-ada'}
   for i in range(len(input_fps)):
-    fp = input_fps[i][0]
+    fp = input_fps[i]
     with open(fp, "r") as f:
         nlines = sum(1 for _ in f)
     if nlines == 1:
@@ -94,32 +94,38 @@ if len(input_fps) > 0:
           if c2 in df.columns:
             df = df.drop(c2, axis=1).rename(columns={c:c2})
 
-      # Process phantom partitions (dump-cluster-resources.py prunes "meta" partitions)
+      # Process phantom partitions:
+      # - dump-cluster-resources.py prunes "meta" partitions
+      # - also handle old partitions that were renamed/shuffled - their nodes are mapped to current partitions
       f = ~df['Partition'].isin(partitions)
       if f.any():
         bads_parts = df.loc[f,'Partition'].unique()
+        part_remaps = {}
         for badp in bads_parts:
-          if badp in part_remaps:
-            df.loc[df['Partition']==badp, 'Partition'] = part_remaps[badp]
-          else:
-            idx = np.where(f)[0][0]
-            nodelist = df['NodeList'].iloc[idx]
-            candidiates = [p for p in partitions if nodelist in resources[p]['Nodes']]
-            if len(candidiates) == 0:
-              raise Exception('need to remap: ' + badp)
-            elif len(candidiates) == 1:
-                part_remaps[badp] = candidiates[0]
-                df.loc[df['Partition']==badp, 'Partition'] = part_remaps[badp]
-            else:
-              # Pick candidate with most resources.
-              newp = candidiates[0]
-              for c in candidiates[1:]:
-                if resources[newp]['MaxCPUsPerNode']*len(resources[newp]['Nodes']) > \
-                  resources[c]['MaxCPUsPerNode']*len(resources[c]['Nodes']):
-                  newp = c
-              part_remaps[badp] = newp
-              df.loc[df['Partition']==badp, 'Partition'] = part_remaps[badp]
-      f = ~df['Partition'].isin(partitions)
+          badp_nodes = df['NodeList'][df['Partition']==badp].unique()
+          for n in badp_nodes:
+            key = (badp, n)
+            f = (df['Partition']==badp) & (df['NodeList']==n)
+            if key not in part_remaps:
+              candidiates = [p for p in partitions if n in resources[p]['Nodes']]
+              if len(candidiates) == 0:
+                if n == 'None assigned':
+                  # These jobs never ran, so hopefully the analysis will already be discarding these.
+                  part_remaps[key] = '_phantom_'
+                else:
+                  raise Exception(f"Need to remap: part '{badp}' on node '{n}'")
+              elif len(candidiates) == 1:
+                part_remaps[key] = candidiates[0]
+              else:
+                # Pick candidate with most resources.
+                newp = candidiates[0]
+                for c in candidiates[1:]:
+                  if resources[newp]['MaxCPUsPerNode']*len(resources[newp]['Nodes']) < \
+                    resources[c]['MaxCPUsPerNode']*len(resources[c]['Nodes']):
+                    newp = c
+                part_remaps[key] = newp
+            df.loc[f, 'Partition'] = part_remaps[key]
+      f = ~df['Partition'].isin(partitions+['_phantom_'])
       if f.any():
         raise Exception(f'Bad partitions still present: {df["Partition"][f].unique()}')
 
@@ -146,13 +152,6 @@ if len(input_fps) > 0:
       if f_running.any():
         df = df[~f_running]
 
-      f_no_maxrss = df['MaxRSS'].isna().to_numpy()
-      if f_no_maxrss.any():
-        # I got no more tricks, but NaN is bad so zero it.
-        f_fail = df['State'].isin(['FAILED', 'CANCELLED', 'TIMEOUT'])
-        f = f_no_maxrss & f_fail
-        df.loc[f, 'MaxRSS'] = 0.0
-
       df = df.sort_index()
 
       for c in ['MaxRSS']:
@@ -175,13 +174,6 @@ if len(input_fps) > 0:
         df_new = df[~f_overlap]
       else:
         df_new = df
-      for c in ['NCPUS', 'ReqMemGB', 'MaxRSS GB']:
-        fna = df_new[c].isna()
-        if fna.any():
-          # jobids = df_new.index[fna]
-          # keys = ['Submit', 'Start', 'Elapsed', 'State', c]
-          # pprint({j:{k:d[j][k] for k in keys} for j in jobids})
-          raise Exception(f'NaNs detected in column "{c}" of parsed file, will cause problems: {fp}')
       df_all = pd.concat([df_all, df_new]).sort_index()
 
     # Persist df_all
