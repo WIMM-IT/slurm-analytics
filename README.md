@@ -56,19 +56,25 @@ Python requirements:
 - pandas
 - numpy
 - matplotlib
-- numba  # optimise core loop
+- numba
 
 The key part is function `aggregate_resource`. 
 This aggregates one particular resource attribute e.g. `MaxRSS` from all jobs to a single time-series of any time resolution e.g. 1 second or 1 day.
-`numba` optimises the critical inner aggregation loop.
-Performance improved further by caching aggregation results in local folder `Cache` - cache key is the `hashlib` sha256 of the input DataFrame object.
+Performance optimised with `numba`, and caching aggregation results in local folder `Cache`.
 
-There are 3 analysis categories:
+### Analysis categories
 
 - resource use. Are users wasting the CPUs or memory they request?
+  - CPU consumption and % utilisation
+  - Memory consumption and % utilisation
+  - user breakdown of "resource waste"
 
-- wait times. Do most users wait for little time? Is wait time getting worse over time? Simply too many users for a particular partition?
+- wait times. Does cluster have enough resources for demand?
+  - weekly distribution of job wait times [as % of job time limit]
+  - total requested resources waiting as % of partition capacity
 
-- users. Who are the power users?
+- users. Who are the biggest users?
+  - weekly plots of most active users according to different metrics: CPUs, memory, #jobs, elapsed time
+  - summary plot of biggest users (CPU & memory)
 
 The plot images are written to local folder `Plots/`.
