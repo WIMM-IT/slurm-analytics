@@ -471,8 +471,8 @@ def fn_analyse_resources(df):
     fig = plt.figure(figsize=(14, 8))
     y_req = df_cpu['NCPUS_sum']
     y_used = df_cpu['NCPUS_real_sum']
-    plt.fill_between(df_mem.index, y_used, label='Used', color='orange')
-    plt.fill_between(df_mem.index, y_req, y_used, label='Requested', color='blue')
+    plt.fill_between(df_cpu.index, y_used, label='Used', color='orange')
+    plt.fill_between(df_cpu.index, y_req, y_used, label='Requested', color='blue')
     plt.xlabel('Date')
     plt.ylabel(f'CPUs')
     plt.title(f'CPU utilisation - partition {p}')
@@ -485,8 +485,8 @@ def fn_analyse_resources(df):
     fig = plt.figure(figsize=(14, 8))
     y_req = df_cpu['NCPUS_sum %']*100.0
     y_used = df_cpu['NCPUS_real_sum %']*100.0
-    plt.fill_between(df_mem.index, y_used, label='Used', color='orange')
-    plt.fill_between(df_mem.index, y_req, y_used, label='Requested', color='blue')
+    plt.fill_between(df_cpu.index, y_used, label='Used', color='orange')
+    plt.fill_between(df_cpu.index, y_req, y_used, label='Requested', color='blue')
     plt.xlabel('Date')
     plt.ylabel(f'CPUs % partition')
     plt.ylim(0, 100)

@@ -3,3 +3,4 @@ Parsed*
 Plots*
 Cache*
 .DS_Store
+__pycache__
