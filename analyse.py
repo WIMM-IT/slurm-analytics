@@ -412,6 +412,12 @@ def fn_analyse_resources(df):
     if p != '*':
       os.makedirs(os.path.join(plot_dp, p.upper()), exist_ok=True)
 
+    # It is possible for MaxRSS to slightly exceed ReqMem, stop this 
+    # affecting resource-waste analysis
+    df_plt['MaxRSS GB'] = np.minimum(df_plt['MaxRSS GB'], df_plt['ReqMemGB'])
+
+    time_range_hours = (df_plt['End'].max() - df_plt['Start'].min()).total_seconds() / 3600
+
     # Memory first
     mem_col = 'MaxRSS GB'
     rss = aggregate_resource(df_plt, mem_col, args.resolution)
@@ -532,10 +538,10 @@ def fn_analyse_resources(df):
     df_mem_users['ReqMemGB-hours'] = df_mem_users['ReqMemGB'] * df_mem_users['Elapsed hours']
     df_mem_users = df_mem_users.drop(['Elapsed hours', mem_col, 'ReqMemGB'], axis=1)
     df_mem_users['Wasted GB-hours'] = df_mem_users['ReqMemGB-hours'] - df_mem_users[f'{mem_col}-hours']
-    df_mem_users['Wasted TB-hours'] = df_mem_users['Wasted GB-hours'] * 0.001
-    df_mem_users_top = df_mem_users.groupby('User').sum().sort_values('Wasted GB-hours', ascending=False)
-    df_mem_users_top = df_mem_users_top[df_mem_users_top['Wasted TB-hours'] > 100]
-    top_wasteful_users = df_mem_users_top[df_mem_users_top['Wasted TB-hours'] > 100].index
+    df_mem_users['Wasted GB %'] = df_mem_users['Wasted GB-hours'] / (total_gb[p]*time_range_hours)
+    df_mem_users_top = df_mem_users.groupby('User').sum().sort_values('Wasted GB %', ascending=False)
+    df_mem_users_top = df_mem_users_top[df_mem_users_top['Wasted GB %'] > 0.01]  # 1% of cluster
+    top_wasteful_users = df_mem_users_top.index.to_numpy()
     if len(top_wasteful_users) > 0:
       if len(top_wasteful_users) > 8:
         # Constrained by number of distinct colours for chart
@@ -543,9 +549,16 @@ def fn_analyse_resources(df):
       #
       fig = plt.figure(figsize=(14, 8))
       stackplot_data = None
-      for u in top_wasteful_users:
-        dfu = df_plt[df_plt['User']==u].copy()
 
+      top_wasteful_users = np.append(top_wasteful_users, '__others__')
+      for u in top_wasteful_users:
+        if u == '__others__':
+          dfu = df_plt[~df_plt['User'].isin(top_wasteful_users)].copy()
+          if dfu.empty:
+            continue
+          u = '*'
+        else:
+          dfu = df_plt[df_plt['User']==u].copy()
         rss = aggregate_resource(dfu, mem_col, args.resolution)
         req = aggregate_resource(dfu, 'ReqMemGB', args.resolution)
         dfu_mem = pd.DataFrame(rss).join(req)
@@ -558,10 +571,11 @@ def fn_analyse_resources(df):
           stackplot_data = dfu_mem
         else:
           stackplot_data = stackplot_data.join(dfu_mem).fillna(0)
-      plt.stackplot(stackplot_data.index.date, [stackplot_data[c] for c in stackplot_data.columns], labels=stackplot_data.columns)
+      colors = plt.rcParams['axes.prop_cycle'].by_key()['color'][:len(top_wasteful_users)-1] + ['#C0C0C0']
+      plt.stackplot(stackplot_data.index.date, [stackplot_data[c] for c in stackplot_data.columns], labels=stackplot_data.columns, colors=colors)
       plt.xlabel('Time')
       plt.ylabel(f'Memory waste %')
-      plt.title(f'Memory waste - partition {p}')
+      plt.title(f'Memory waste - top users - partition {p}')
       plt.legend()
       fn = 'resource-waste-memory-user-breakdown.png'
       plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
@@ -574,8 +588,10 @@ def fn_analyse_resources(df):
     df_cpu_users = df_cpu_users.drop(['Elapsed hours', 'NCPUS', 'NCPUS_real'], axis=1)
     df_cpu_users['Wasted CPU-hours'] = df_cpu_users['CPU-hours'] - df_cpu_users['CPU_real-hours']
     df_cpu_users_top = df_cpu_users.groupby('User').sum().sort_values('Wasted CPU-hours', ascending=False)
-    df_cpu_users_top = df_cpu_users_top[df_cpu_users_top['Wasted CPU-hours'] > 10000]
-    top_wasteful_users = df_cpu_users_top[df_cpu_users_top['Wasted CPU-hours'] > 10000].index
+    df_cpu_users['Wasted CPU %'] = df_cpu_users['Wasted CPU-hours'] / (total_cpus[p]*time_range_hours)
+    df_cpu_users_top = df_cpu_users.groupby('User').sum().sort_values('Wasted CPU %', ascending=False)
+    df_cpu_users_top = df_cpu_users_top[df_cpu_users_top['Wasted CPU %'] > 0.005]
+    top_wasteful_users = df_cpu_users_top.index.to_numpy()
     if len(top_wasteful_users) > 0:
       if len(top_wasteful_users) > 8:
         # Constrained by number of distinct colours for chart
@@ -583,9 +599,15 @@ def fn_analyse_resources(df):
       #
       fig = plt.figure(figsize=(14, 8))
       stackplot_data = None
+      top_wasteful_users = np.append(top_wasteful_users, '__others__')
       for u in top_wasteful_users:
-        dfu = df_plt[df_plt['User']==u].copy()
-
+        if u == '__others__':
+          dfu = df_plt[~df_plt['User'].isin(top_wasteful_users)].copy()
+          if dfu.empty:
+            continue
+          u = '*'
+        else:
+          dfu = df_plt[df_plt['User']==u].copy()
         ncpus_req = aggregate_resource(dfu, 'NCPUS', args.resolution)
         ncpus_real = aggregate_resource(dfu, 'NCPUS_real', args.resolution)
         dfu_cpu = pd.DataFrame(ncpus_req).join(ncpus_real)
@@ -598,11 +620,13 @@ def fn_analyse_resources(df):
           stackplot_data = dfu_cpu
         else:
           stackplot_data = stackplot_data.join(dfu_cpu).fillna(0)
-      plt.stackplot(stackplot_data.index.date, [stackplot_data[c] for c in stackplot_data.columns], labels=stackplot_data.columns)
+      # Set color for 'other users' to light gray
+      colors = plt.rcParams['axes.prop_cycle'].by_key()['color'][:len(top_wasteful_users)-1] + ['#C0C0C0']
+      plt.stackplot(stackplot_data.index.date, [stackplot_data[c] for c in stackplot_data.columns], labels=stackplot_data.columns, colors=colors)
       plt.xlabel('Time')
       plt.ylabel(f'CPUs waste %')
       plt.legend()
-      plt.title(f'CPUs waste - partition {p}')
+      plt.title(f'CPUs waste - top users - partition {p}')
       fn = 'resource-waste-cpus-user-breakdown.png'
       plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
       plt.savefig(plt_fp)
