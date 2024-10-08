@@ -55,10 +55,10 @@ if len(input_fps) > 0:
   for i in range(len(input_fps)):
     fp = input_fps[i]
     with open(fp, "r") as f:
-        nlines = sum(1 for _ in f)
+      nlines = sum(1 for _ in f)
     if nlines == 1:
-        # Just header
-        continue
+      # Just header
+      continue
 
     fn = os.path.basename(fp)
     pkl_fp = os.path.join('Parsed', cluster_id, fn).replace(".csv", ".pkl")
@@ -66,13 +66,17 @@ if len(input_fps) > 0:
     if os.path.isfile(pkl_fp):
       pkl_mod_dt = os.path.getmtime(pkl_fp)
       csv_mod_dt = os.path.getmtime(fp)
-      if df_all_rebuild:
-          # Need the data
-          print("- loading pkl")
-          with open(pkl_all_fp, 'rb') as F:
-            df = pkl.load(F)
-      else:
+
+      re_parse = csv_mod_dt > pkl_mod_dt
+
+      if not (re_parse or df_all_rebuild):
         continue
+
+      if df_all_rebuild and not re_parse:
+        # Need the data
+        with open(pkl_all_fp, 'rb') as F:
+          df = pkl.load(F)
+
     if df is None:
       print(f"Parsing: {fp}")
       pattern = r'(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})'
