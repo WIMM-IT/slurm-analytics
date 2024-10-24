@@ -1123,6 +1123,33 @@ def fn_analyse_users(df):
       plt.close(fig)
 
 
+def fn_analyse_job_runtimes(df):
+  df = df[df['State']=='COMPLETED'].copy()
+
+  df['Elapsed seconds'] = df['Elapsed'].dt.total_seconds()
+  df['Elapsed hours'] = df['Elapsed seconds'] * (1.0 / (60*60))
+
+  for p in [args.partition] if args.partition else partitions:
+    df_plot = df[['User', 'Partition', 'Submit', 'Elapsed hours']]
+    df_plot = df_plot[df_plot['Partition']==p]
+    if df_plot.empty:
+      continue
+    df_plot = df_plot.set_index('Submit')
+
+    load_metric = 'NumJobs'
+    df_plot = df_plot.copy()
+    df_plot['NumJobs'] = 1
+
+    fig, ag = plot_time_series_violins(df_plot, 'Elapsed hours', load_metric, yscaling='sqrt')
+    plt.xlabel('Week end')
+    plt.ylabel('Elapsed (hours)')
+    plt.title(f'Job run times, weekly distributions, area ≈ {load_metric}, partition {p}')
+    fn = 'job-times-distribution-weekly.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
+
+
 if args.resources:
   fn_analyse_resources(df)
 
@@ -1130,6 +1157,7 @@ if args.waits:
   fn_analyse_waiting(df)
 
 if args.users:
-  fn_analyse_users(df)
+  # fn_analyse_users(df)
+  fn_analyse_job_runtimes(df)
 
 ##
