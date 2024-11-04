@@ -2,6 +2,22 @@
 
 Analyse Slurm sacct data with Python Pandas.
 
+#### Analysis categories
+
+- resource use. Are users wasting the CPUs or memory they request?
+  - CPU consumption and % utilisation
+  - Memory consumption and % utilisation
+  - user breakdown of "resource waste"
+
+- wait times. Does cluster have enough resources for demand?
+  - weekly distribution of job wait times [as % of job time limit]
+  - total requested resources waiting as % of partition capacity
+  - wait time vs recent resource use
+
+- users. Who are the biggest users?
+  - weekly plots of most active users according to different metrics: CPUs, memory, #jobs, elapsed time
+  - summary plot of biggest users (CPU & memory)
+
 ## Step 1: extract `sacct` data
 
 Run `python sacct-dump.py` in the cluster, as any user.
@@ -60,22 +76,6 @@ Python requirements:
 - numba
 
 Aggregation is the core function that combines one particular resource attribute e.g. MaxRSS from all jobs to a single time-series of any time resolution e.g. 1 second or 1 day. Performance optimised with Numba, and aggregation results cached in local folder `Cache`.
-
-### Analysis categories
-
-- resource use. Are users wasting the CPUs or memory they request?
-  - CPU consumption and % utilisation
-  - Memory consumption and % utilisation
-  - user breakdown of "resource waste"
-
-- wait times. Does cluster have enough resources for demand?
-  - weekly distribution of job wait times [as % of job time limit]
-  - total requested resources waiting as % of partition capacity
-  - wait time vs recent resource use
-
-- users. Who are the biggest users?
-  - weekly plots of most active users according to different metrics: CPUs, memory, #jobs, elapsed time
-  - summary plot of biggest users (CPU & memory)
 
 The plot images are written to local folder `Plots/`.
 Maybe in future the plots can be generated/viewed via a React webpage etc.
