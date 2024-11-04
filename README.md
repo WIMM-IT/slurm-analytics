@@ -17,7 +17,7 @@ that saves node resource information into `Dumps/<cluster-name>/resources/`.
 
 ## Step 2: parse `sacct` data
 
-`sacct` output is parsed using the parser taken from AWS's HPC Cost Simulator:
+`sacct` output is parsed using the parser taken from [AWS's HPC Cost Simulator](https://github.com/aws-samples/hpc-cost-simulator):
 
     https://github.com/aowenson-imm/hpc-cost-simulator/tree/slurm-sacct-parser
 
@@ -59,10 +59,6 @@ Python requirements:
 - matplotlib
 - numba
 
-The key part is function `aggregate_resource`. 
-This aggregates one particular resource attribute e.g. `MaxRSS` from all jobs to a single time-series of any time resolution e.g. 1 second or 1 day.
-Performance optimised with `numba`, and caching aggregation results in local folder `Cache`.
-
 ### Analysis categories
 
 - resource use. Are users wasting the CPUs or memory they request?
@@ -80,3 +76,4 @@ Performance optimised with `numba`, and caching aggregation results in local fol
   - summary plot of biggest users (CPU & memory)
 
 The plot images are written to local folder `Plots/`.
+Maybe in future the plots can be generated/viewed via a React webpage etc.
