@@ -59,6 +59,8 @@ Python requirements:
 - matplotlib
 - numba
 
+Aggregation is the core function that combines one particular resource attribute e.g. MaxRSS from all jobs to a single time-series of any time resolution e.g. 1 second or 1 day. Performance optimised with Numba, and aggregation results cached in local folder `Cache`.
+
 ### Analysis categories
 
 - resource use. Are users wasting the CPUs or memory they request?
