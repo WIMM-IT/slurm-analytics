@@ -63,20 +63,19 @@ if len(input_fps) > 0:
     fn = os.path.basename(fp)
     pkl_fp = os.path.join('Parsed', cluster_id, fn).replace(".csv", ".pkl")
     df = None
+    re_parse = False
     if os.path.isfile(pkl_fp):
       pkl_mod_dt = os.path.getmtime(pkl_fp)
       csv_mod_dt = os.path.getmtime(fp)
-
       re_parse = csv_mod_dt > pkl_mod_dt
-
       if not (re_parse or df_all_rebuild):
         continue
-
       if df_all_rebuild and not re_parse:
         # Need the data
-        with open(pkl_all_fp, 'rb') as F:
+        with open(pkl_fp, 'rb') as F:
           df = pkl.load(F)
 
+    df_was_None = df is None
     if df is None:
       print(f"Parsing: {fp}")
       pattern = r'(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})'
@@ -156,7 +155,7 @@ if len(input_fps) > 0:
       if f_running.any():
         df = df[~f_running]
 
-      df = df.sort_index()
+      df = df.sort_values('Submit')
 
       for c in ['MaxRSS']:
         df[c+' GB'] = df[c] * 1e-9
@@ -178,7 +177,7 @@ if len(input_fps) > 0:
         df_new = df[~f_overlap]
       else:
         df_new = df
-      df_all = pd.concat([df_all, df_new]).sort_index()
+      df_all = pd.concat([df_all, df_new]) ; df_all = df_all.sort_values('Submit')
 
     # Persist df_all
     if not os.path.isdir(os.path.dirname(pkl_all_fp)):
@@ -186,7 +185,8 @@ if len(input_fps) > 0:
     with open(pkl_all_fp, 'wb') as F:
       pkl.dump(df_all, F)
 
-    # Persist 'df'. Important to do *after* updating 'df_all',
-    # as existence of 'df' prevents re-parsing this file.
-    with open(pkl_fp, 'wb') as F:
-      pkl.dump(df, F)
+    if df_was_None or re_parse:
+      # Persist 'df'. Important to do *after* updating 'df_all',
+      # as existence of 'df' prevents re-parsing this file.
+      with open(pkl_fp, 'wb') as F:
+        pkl.dump(df, F)
