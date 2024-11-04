@@ -33,8 +33,6 @@ Python requirements:
 
 ## Step 3: analyse
 
-This is the fun part.
-
     usage: analyse.py [-h] -n CLUSTER_NAME [-r] [-w] [-u] [-t WEEKS]
                       [-p PARTITION]
 
@@ -42,15 +40,18 @@ This is the fun part.
 
     optional arguments:
       -h, --help            show this help message and exit
-      -n CLUSTER_NAME, --cluster-name CLUSTER_NAME
-                            Cluster name
       -r, --resources       Analyse resource use
       -w, --waits           Analyse wait times
       -u, --users           Analyse users
-      -t WEEKS, --weeks WEEKS
-                            Analyse just last N weeks
       -p PARTITION, --partition PARTITION
                             Analyse just this Slurm partition
+      -a, --annual          Compare years (only some charts supported)
+      -n WEEKS, --weeks WEEKS
+                            Analyse just last N weeks
+      -t {H,D,W}, --resolution {H,D,W}
+                            Aggregation resolution time period, default: D
+      -d PLOTS_DIR, --plots-dir PLOTS_DIR
+                            Save plots here instead of "Plots/"
 
 Python requirements:
 - pandas
@@ -72,6 +73,7 @@ Performance optimised with `numba`, and caching aggregation results in local fol
 - wait times. Does cluster have enough resources for demand?
   - weekly distribution of job wait times [as % of job time limit]
   - total requested resources waiting as % of partition capacity
+  - wait time vs recent resource use
 
 - users. Who are the biggest users?
   - weekly plots of most active users according to different metrics: CPUs, memory, #jobs, elapsed time

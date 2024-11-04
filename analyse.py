@@ -30,6 +30,7 @@ parser.add_argument('-r', '--resources',  action='store_true', help='Analyse res
 parser.add_argument('-w', '--waits',      action='store_true', help='Analyse wait times')  # Working on a metric for "queue fairness"
 parser.add_argument('-u', '--users',      action='store_true', help='Analyse users')
 parser.add_argument('-p', '--partition',  type=str, default=None, help='Analyse just this Slurm partition')
+parser.add_argument('-a', '--annual',     action='store_true', help='Compare years (only some charts supported)')
 parser.add_argument('-n', '--weeks',      type=int, default=None, help='Analyse just last N weeks')
 parser.add_argument('-t', '--resolution', type=str, default='D', choices=['H', 'D', 'W'], help='Aggregation resolution time period, default: %(default)s')
 parser.add_argument('-d', '--plots-dir', type=str, default='Plots', help='Save plots here instead of "Plots/"')
@@ -82,14 +83,53 @@ if os.path.isdir('Cache'):
             os.remove(fp)
 
 
-if args.weeks:
-  cutoff_dt = df['End'].max() - pd.Timedelta(weeks=args.weeks)
-  df = df[df['End']>=cutoff_dt]
-
-
 # Clean data:
 df = df[df['Elapsed'] > pd.Timedelta(0)]
 df = df.drop('CPUTimeRAW', axis=1, errors='ignore')  # pointless because CPUTimeRaw * NCPUS = Elapsed
+# It is possible for MaxRSS to slightly exceed ReqMem, stop this 
+# affecting resource-waste analysis
+df['MaxRSS GB'] = np.minimum(df['MaxRSS GB'], df['ReqMemGB'])
+
+
+# Useful preprocessing
+df['AvgCPU'] = df['TotalCPU'].to_numpy() / df['NCPUS'].to_numpy()
+df['AvgCPULoad'] = df['AvgCPU'] / df['Elapsed']
+df['NCPUS_real'] = df['NCPUS'].astype('float') * df['AvgCPULoad']
+df['Timelimit seconds'] = df['Timelimit'].dt.total_seconds()
+df['Timelimit days'] = df['Timelimit seconds'] * (1.0 / (24*60*60))
+df['Timelimit hours'] = df['Timelimit seconds'] * (1.0 / (60*60))
+df['WaitTime'] = df['Start'] - df['Submit']
+df['WaitTime seconds'] = df['WaitTime'].dt.total_seconds()
+df['WaitTime hours'] = df['WaitTime seconds'] * (1.0 / (60*60))
+df['WaitTime minutes'] = df['WaitTime hours']*60
+df['WaitTime days'] = df['WaitTime seconds'] * (1.0 / (24*60*60))
+df['Elapsed seconds'] = df['Elapsed'].dt.total_seconds()
+df['Elapsed hours'] = df['Elapsed seconds'] * (1.0 / (60*60))
+df['Elapsed minutes'] = df['Elapsed hours']*60
+df['WaitTime % elapsed'] = df['WaitTime hours'] / df['Elapsed hours']
+df['WaitTime % limit'] = df['WaitTime hours'] / df['Timelimit hours']
+df['TotalCPU seconds'] = df['TotalCPU'].dt.total_seconds()
+df['TotalCPU hours'] = df['TotalCPU seconds'] * (1.0 / (60*60))
+df['ReqMem TB hours'] = df['ReqMemGB'] * df['Elapsed hours'] * 0.001
+df['MaxRSS TB hours'] = df['MaxRSS GB'] * df['Elapsed hours'] * 0.001
+
+
+if args.weeks:
+  cutoff_dt = df['End'].max() - pd.Timedelta(weeks=args.weeks)
+  if args.annual:
+    # Need a N-week slice from each year, not just this year
+    year_start = df['Submit'].min().year
+    year_end = df['End'].max().year
+    slices = []
+    for year in range(year_start, year_end+1):
+      cutoff_dt_year = cutoff_dt - pd.Timedelta(days=365*(year_end-year))
+      f = (df['End']>=cutoff_dt_year) & (df['End']<(cutoff_dt_year+pd.Timedelta(weeks=args.weeks)))
+      s = df[f]
+      slices.append(s)
+    df_sliced_yearly = pd.concat(slices)
+    df_sliced_yearly = df_sliced_yearly.sort_values('Submit')
+
+  df = df[df['End']>=cutoff_dt]
 
 
 # This is the critical magic function, for combining all jobs in df
@@ -121,29 +161,87 @@ def aggregate_resource(df, x, period='H', cache=True):
   fna = df[x].isna()
   if fna.any():
     df = df[~fna]
+    if df.empty:
+      raise Exception(f"df is empty after removing NaN values from column '{x}'")
 
-  # print(f"Aggregating '{x}' on '{period}' period")
-  if period == 'H':
-    freq='H'
-    time_index = pd.date_range(start=df['Start'].min().floor('H'), end=df['End'].max().ceil('H'), freq=freq)
-  elif period == 'D':
-    freq='D'
-    time_index = pd.date_range(start=df['Start'].min().floor('D'), end=df['End'].max().ceil('D'), freq=freq)
-  elif period == '15m':
+  rounding = None
+  if period == 'D':
+    freq = '1D'
+  elif period == 'W':
+    freq = '1W'
+  elif period in ['H', '1H']:
+    freq = '1H'
+  elif period in ['15m', '15T']:
     freq = '15T'
-    time_index = pd.date_range(start=df['Start'].min().floor('H'), end=df['End'].max().ceil('H'), freq=freq)
-  elif period == '5m':
+    rounding = 'H'
+  elif period in ['5m', '5T']:
     freq = '5T'
-    time_index = pd.date_range(start=df['Start'].min().floor('H'), end=df['End'].max().ceil('H'), freq=freq)
-  elif period == '1m':
+    rounding = 'H'
+  elif period in ['1m', '1T']:
     freq = '1T'
-    time_index = pd.date_range(start=df['Start'].min().floor('H'), end=df['End'].max().ceil('H'), freq=freq)
+    rounding = 'H'
   else:
     raise Exception(f"Not implemented period='{period}'")
-  itd = time_index[1] - time_index[0]
-  intervals_df = pd.DataFrame({
-    'IntStart': time_index[:-1],
-    'IntEnd': time_index[1:]})
+  if rounding is None:
+    rounding = freq
+  range_start = df['Start'].min()
+  range_end = df['End'].max()
+  if rounding == '1W':
+    range_start = range_start.floor('D')
+    range_start -= pd.Timedelta(days=range_start.weekday())
+    range_end = range_end.ceil('D')
+    range_end += pd.Timedelta(days=7-range_end.weekday())
+  else:
+    range_start = range_start.floor(rounding)
+    range_end = range_end.ceil(rounding)
+  try:
+    time_index = pd.date_range(start=range_start, end=range_end, freq=freq)
+  except Exception:
+    print("- df:") ; print(df[['Start', 'End']])
+    print("- df['Start'].min() =", df['Start'].min())
+    print("- df['End'].max() =", df['End'].max())
+    print("- freq =", freq)
+    print("- range_start =", range_start)
+    print("- range_end =", range_end)
+    raise
+
+
+  # Remove buckets during any big gaps in data
+  gap_threshold = pd.Timedelta(weeks=8)
+  df = df.sort_values('Start')  # important!
+  gap_mask = df['Start'].diff() > gap_threshold
+  keep_mask = pd.Series(True, index=time_index)
+  if gap_mask.any():
+    # print("- gap_mask:") ; print(gap_mask)
+    gap_indices = gap_mask[gap_mask].index
+    # print("- gap_indices:") ; print(gap_indices)
+    for i in range(len(gap_indices)):
+      # print("- i =", i)
+      jobid = gap_indices[i]
+      # print("- jobid =", jobid)
+      idx = df.index.get_loc(jobid)
+      # print("- gap region:")
+      # print(df['Start'].iloc[idx-3:idx+3])
+      bucket_end = df['Start'].iloc[idx-1]
+      # print("- bucket_end =", bucket_end)
+      bucket_end_idx = time_index.searchsorted(bucket_end, side='right') - 1
+      # print("- bucket_end_idx =", bucket_end_idx)
+      # print("- time_index[bucket_end_idx] =", time_index[bucket_end_idx])
+      next_bucket_start = df['Start'].iloc[idx]
+      # print("- next_bucket_start =", next_bucket_start)
+      next_bucket_start_idx = time_index.searchsorted(next_bucket_start, side='right') - 1
+      # print("- next_bucket_start_idx =", next_bucket_start_idx)
+      # print("- time_index[next_bucket_start_idx] =", time_index[next_bucket_start_idx])
+      keep_mask.iloc[bucket_end_idx+1:next_bucket_start_idx] = False
+    # print(time_index)
+    time_index = time_index[keep_mask]
+    # print("- time_index:") ; print(time_index)
+    # raise Exception('review')
+
+  itd = pd.Timedelta(freq)
+  intervals_df = pd.DataFrame({'IntStart': time_index})
+  intervals_df['IntEnd'] = intervals_df['IntStart'] + itd
+  #
   intervals_df.index = intervals_df['IntStart']
   intervals_df.index.names = ['idx']
   df = df.sort_values('Start')
@@ -208,10 +306,13 @@ def aggregate_resource(df, x, period='H', cache=True):
     inner_df['Inner_StartIdx'] = inner_df['Start_Idx'] + 1
     inner_df['Inner_EndIdx'] = inner_df['End_Idx'] - 1
 
-    # agg_backup = agg.copy()
+    agg_backup = agg.copy()
+
     # # Have to manually iterate over each job, but use indices to optimise updating sum.
-    # inner_df = inner_df.sort_values('Elapsed')
+    # inner_df = inner_df.sort_values('Elapsed')  # why?
     # # for i in range(inner_df.shape[0]):
+    # import tqdm
+    # from time import perf_counter as pc
     # t = tqdm.tqdm(range(inner_df.shape[0]))
     # t.set_description(f'Aggregating {x} ...')
     # t0 = pc()
@@ -251,15 +352,14 @@ def aggregate_resource(df, x, period='H', cache=True):
         x_values = np.ones(len(inner_df))
     else:
         x_values = inner_df[x].to_numpy()
-    agg_values = agg.to_numpy()
-    # agg_values = agg_backup.to_numpy()
+    # agg_values = agg.to_numpy()
+    agg_values = agg_backup.to_numpy()
     # print(f'Aggregating {x} (period={period})')
     agg_values2 = process_inner_intervals(Inner_StartIdx_values, 
                                           Inner_EndIdx_values, 
                                           x_values, 
                                           agg_values)
     # agg2 = pd.Series(index=time_index, data=agg_values2)
-    agg = pd.Series(index=time_index, data=agg_values2)
     # t1 = pc()
     # print(f"- JIT time = {t1-t0:.2} seconds")
     # print("- agg2.equals(agg) =", agg2.equals(agg))
@@ -267,8 +367,11 @@ def aggregate_resource(df, x, period='H', cache=True):
     #   raise Exception("JIT output is different")
     # else:
     #   print("GOOD, JIT matches")
+    agg = pd.Series(index=time_index, data=agg_values2)
 
   agg.name = f'{x}_sum'
+
+  agg = agg.sort_index()
 
   # Even with JIT, caching still helps but speedup much less (~1.5x)
   if cache:
@@ -395,26 +498,29 @@ def plot_time_series_violins(df, x, s, period='W', yscaling=None):
   return fig, ax
 
 
+def timedelta_to_compact_str(td):
+  components = td.components
+  parts = []
+  if components.days:
+      parts.append(f"{components.days}d")
+  if components.hours:
+      parts.append(f"{components.hours}h") 
+  if components.minutes:
+      parts.append(f"{components.minutes}m")
+  if components.seconds:
+      parts.append(f"{components.seconds}s")
+  return ''.join(parts)
+
+
 def fn_analyse_resources(df):
   for p in [args.partition] if args.partition else partitions+['*']:
-    if p == '*':
-      df_plt = df
-    else:
-      df_plt = df[df['Partition']==p].copy()
-      if df_plt.empty:
-        continue
+    df_plt = df.copy() if p == '*' else df[df['Partition']==p].copy()
+    if df_plt.empty:
+      continue
     if p == '*':
       print(f"Analysing resource use across all partitions")
     else:
       print(f"Analysing resource use in partition '{p}'")
-
-    os.makedirs(plot_dp, exist_ok=True)
-    if p != '*':
-      os.makedirs(os.path.join(plot_dp, p.upper()), exist_ok=True)
-
-    # It is possible for MaxRSS to slightly exceed ReqMem, stop this 
-    # affecting resource-waste analysis
-    df_plt['MaxRSS GB'] = np.minimum(df_plt['MaxRSS GB'], df_plt['ReqMemGB'])
 
     time_range_hours = (df_plt['End'].max() - df_plt['Start'].min()).total_seconds() / 3600
 
@@ -465,9 +571,6 @@ def fn_analyse_resources(df):
     plt.close(fig)
 
     # Now analyse CPU
-    df_plt['AvgCPU'] = df_plt['TotalCPU'].to_numpy() / df_plt['NCPUS'].to_numpy()
-    df_plt['AvgCPULoad'] = df_plt['AvgCPU'] / df_plt['Elapsed']
-    df_plt['NCPUS_real'] = df_plt['NCPUS'].astype('float') * df_plt['AvgCPULoad']
     req = aggregate_resource(df_plt, 'NCPUS', args.resolution)
     real = aggregate_resource(df_plt, 'NCPUS_real', args.resolution)
     df_cpu = pd.DataFrame(real).join(req)
@@ -512,7 +615,6 @@ def fn_analyse_resources(df):
     df_sys_waste['CPU wasted %'] = df_sys_waste['CPU wasted'] / total_cpus[p]
     fig = plt.figure(figsize=(14, 8))
     if df_sys_waste['Mem wasted %'].mean() > df_sys_waste['CPU wasted %'].mean():
-      # Fill CPU plot, draw memory on top as line
       plt.plot(df_sys_waste.index, df_sys_waste['Mem wasted %']*100.0, label='Memory', color='blue')
       plt.fill_between(df_sys_waste.index, df_sys_waste['CPU wasted %']*100.0, label='CPU', color='orange')
     else:
@@ -521,7 +623,6 @@ def fn_analyse_resources(df):
       plt.fill_between(df_sys_waste.index, df_sys_waste['Mem wasted %']*100.0, label='Memory', color='orange')
     plt.xlabel('Time')
     plt.ylabel(f'System waste %')
-    # plt.ylim(0, 100)
     plt.title(f'System waste - partition {p}')
     plt.legend()
     fn = 'resource-waste.png'
@@ -633,14 +734,77 @@ def fn_analyse_resources(df):
       plt.close(fig)
 
 
-def fn_analyse_waiting(df):
-  # Clean data:
-  # df = df.drop('State', axis=1, errors='ignore')
-  df = df.drop('AvgCPU', axis=1, errors='ignore')
-  df = df.drop('MinCPU', axis=1, errors='ignore')
-  df = df.drop('CPUTimeRAW', axis=1, errors='ignore')
-  df = df.drop('MaxRSS GB', axis=1, errors='ignore')
+def fn_analyse_resources_yearly(df):
+  for p in [args.partition] if args.partition else partitions+['*']:
+    df_plt = df.copy() if p == '*' else df[df['Partition']==p].copy()
+    if df_plt.empty:
+      continue
+    if p == '*':
+      print(f"Analysing resource use yearly across all partitions")
+    else:
+      print(f"Analysing resource use yearly in partition '{p}'")
 
+    rss = aggregate_resource(df_plt, 'MaxRSS GB', args.resolution)
+    req = aggregate_resource(df_plt, 'ReqMemGB', args.resolution)
+    df_mem = pd.DataFrame(rss).join(req)
+    for x in list(df_mem.columns):
+      df_mem[f'{x} %'] = df_mem[f'{x}'] / total_gb[p]
+    df_mem['Mem wasted'] = df_mem['ReqMemGB_sum'] - df_mem['MaxRSS GB_sum']
+
+    cpu_col = 'NCPUS_real'
+    real = aggregate_resource(df_plt, cpu_col, args.resolution)
+    req  = aggregate_resource(df_plt, 'NCPUS', args.resolution)
+    df_cpu = pd.DataFrame(real).join(req)
+    for x in list(df_cpu.columns):
+      df_cpu[f'{x} %'] = df_cpu[f'{x}'] / total_cpus[p]
+    df_cpu['CPU wasted'] = df_cpu['NCPUS_sum'] - df_cpu[f'{cpu_col}_sum']
+
+    df_sys_waste = df_mem.join(df_cpu)
+    df_sys_waste['Mem wasted %'] = df_sys_waste['Mem wasted'] / total_gb[p]
+    df_sys_waste['CPU wasted %'] = df_sys_waste['CPU wasted'] / total_cpus[p]
+
+    years = range(df_sys_waste.index.min().year, df_sys_waste.index.max().year+1)
+    last_year = years[-1]
+
+    fig = plt.figure(figsize=(18, 8))
+    for year in years:
+      df_year = df_sys_waste.loc[f'{year}-01-01':f'{year}-12-31'].copy()
+      # print(f"- df year={year}:") ; print(df_year)
+      if year != last_year:
+        df_year.index += pd.Timedelta(days=365*(last_year-year))
+      plt.plot(df_year.index, df_year['Mem wasted %']*100.0, label=year)
+    plt.xlabel('Time')
+    plt.ylabel(f'Memory waste %')
+    plt.title(f'Memory waste - partition {p}')
+    plt.legend()
+    fn = 'resource-waste-memory-yearly.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
+
+    fig = plt.figure(figsize=(18, 8))
+    for year in years:
+      df_year = df_sys_waste.loc[f'{year}-01-01':f'{year}-12-31'].copy()
+      if year != last_year:
+        df_year.index += pd.Timedelta(days=365*(last_year-year))
+      plt.plot(df_year.index, df_year['CPU wasted %']*100.0, label=year)
+    plt.xlabel('Time')
+    plt.ylabel(f'CPU waste %')
+    plt.title(f'CPU waste - partition {p}')
+    plt.legend()
+    fn = 'resource-waste-cpus-yearly.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
+
+
+os.makedirs(plot_dp, exist_ok=True)
+for p in [args.partition] if args.partition else partitions+['*']:
+  if p != '*':
+    os.makedirs(os.path.join(plot_dp, p.upper()), exist_ok=True)
+
+
+def fn_analyse_waiting(df):
   # Exclude jobs with artificial user-created delays
   artificial_delays = {'Dependency', 'DependencyNeverSatisfied', 'BeginTime', 'JobHeldUser', 'ReqNodeNotAvail'}
   f_user_delay = (df['Reason'].isin(artificial_delays)).to_numpy()
@@ -648,141 +812,79 @@ def fn_analyse_waiting(df):
     # print(f"Dropping {np.sum(f_user_delay)}/{df.shape[0]} jobs as these had artificial delay caused by user")
     df = df[~f_user_delay].copy()
 
-  df['Timelimit seconds'] = df['Timelimit'].dt.total_seconds()
-  df['Timelimit days'] = df['Timelimit seconds'] * (1.0 / (24*60*60))
-  df['Timelimit hours'] = df['Timelimit seconds'] * (1.0 / (60*60))
+  df_wait = df[['Submit', 'Start', 'End', 'Elapsed', 'User', 'Partition', 'WaitTime hours', 'WaitTime % limit', 'NCPUS', 'ReqMemGB', 'TotalCPU hours', 'MaxRSS TB hours', 'Elapsed hours']].copy()
 
-  df['WaitTime'] = df['Start'] - df['Submit']
-  df['WaitTime seconds'] = df['WaitTime'].dt.total_seconds()
-  df['WaitTime hours'] = df['WaitTime seconds'] * (1.0 / (60*60))
-  df['WaitTime minutes'] = df['WaitTime hours']*60
-  df['WaitTime days'] = df['WaitTime seconds'] * (1.0 / (24*60*60))
-
-  df['Elapsed seconds'] = df['Elapsed'].dt.total_seconds()
-  df['Elapsed hours'] = df['Elapsed seconds'] * (1.0 / (60*60))
-  df['Elapsed minutes'] = df['Elapsed hours']*60
-
-  df['WaitTime % elapsed'] = df['WaitTime hours'] / df['Elapsed hours']
-  df['WaitTime % limit'] = df['WaitTime hours'] / df['Timelimit hours']
-
-  df['TotalCPU seconds'] = df['TotalCPU'].dt.total_seconds()
-  df['TotalCPU hours'] = df['TotalCPU seconds'] * (1.0 / (60*60))
-  df['ReqMem TB hours'] = df['ReqMemGB'] * df['Elapsed hours'] * 0.001
-
-  # Round some numbers
-  df['WaitTime hours'] = df['WaitTime hours'].round(1)
-  df['TotalCPU hours'] = df['TotalCPU hours'].round(1)
-  df['ReqMem TB hours'] = df['ReqMem TB hours'].round(1)
-
-
-  df_wait = df[['Submit', 'Start', 'Partition', 'WaitTime hours', 'WaitTime % limit', 'NCPUS', 'ReqMemGB', 'TotalCPU hours', 'Elapsed hours']].copy()
-
-  df_wait['TB*CPU'] = df_wait['ReqMemGB'] * 0.001 * df_wait['NCPUS']
-  rcol = 'TB*CPU'
+  # df_wait['TB*CPU'] = df_wait['ReqMemGB'] * 0.001 * df_wait['NCPUS']
+  # rcol = 'TB*CPU'
+  rcol = 'ReqMemGB'
+  df_wait = df_wait[~df_wait[rcol].isna()].copy()  # almost-instant jobs lack memory info
 
   # Time-series for each partition
-  for p in [args.partition] if args.partition else partitions:
-    if p == '*':
-      print(f"Analysing wait time across all partitions")
-      dfp = df_wait.copy()
-    else:
-      dfp = df_wait[df_wait['Partition']==p].copy()
-    dfp = dfp[dfp['WaitTime hours']>0]
-    dfp = dfp[dfp['WaitTime hours']<48]
+  for p in [args.partition] if args.partition else partitions+['*']:
+    dfp = df_wait.copy() if p == '*' else df_wait[df_wait['Partition']==p].copy()
+    dfp = dfp[(dfp['WaitTime hours']>0) & (dfp['WaitTime hours']<48)]
     if dfp.empty:
       continue
+    if p == '*':
+      print(f"Analysing wait time across all partitions")
+    else:
       print(f"Analysing wait time in partition '{p}'")
 
-    os.makedirs(plot_dp, exist_ok=True)
-    if p != '*':
-      os.makedirs(os.path.join(plot_dp, p.upper()), exist_ok=True)
-
-    load_metric = 'TotalCPU hours'
-    dfps = dfp.set_index('Submit')
-
-    # Violin plot of binned wait times
-    df_plot = dfp[['Submit', 'WaitTime hours', 'WaitTime % limit', load_metric]].copy().set_index('Submit')
-    df_plot['WaitTime % limit'] = 100*df_plot['WaitTime % limit']
-    # Absolute wait time
-    if df_plot['WaitTime hours'].max() > 40:
-      fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric, yscaling='log')
-    elif df_plot['WaitTime hours'].max() > 40:
-      fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric, yscaling='sqrt')
-    else:  
-      fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric)
-    plt.xlabel('Week end')
-    plt.ylabel('Wait time (hours)')
-    plt.title(f'Wait time, weekly distributions, area ≈ {load_metric}, partition {p}')
-    fn = 'wait-distribution-weekly.png'
-    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
-    plt.savefig(plt_fp)
-    plt.close(fig)
-    #
-    # Relative wait time (% of time-limit)
-    if df_plot['WaitTime % limit'].max() > 3000:
-      # Need more aggressive Y scaling
-      fig, ag = plot_time_series_violins(df_plot, 'WaitTime % limit', load_metric, yscaling='log')
-    else:
-      fig, ag = plot_time_series_violins(df_plot, 'WaitTime % limit', load_metric, yscaling='sqrt')
-    plt.xlabel('Week end')
-    plt.ylabel('Wait time % time limit')
-    #
-    plt.title(f'Wait time % job limit, weekly distributions, area ≈ {load_metric}, partition {p}')
-    fn = 'wait-distribution-weekly-pct.png'
-    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
-    plt.savefig(plt_fp)
-    plt.close(fig)
-
-
-    # Plot of submit time vs wait
-    # Update: this plot redundant, the violin plot above much better
-    # x = dfp[['Submit', 'WaitTime hours']].copy()
-    # # f='4H'
-    # f='1D'
-    # x = x.groupby(pd.Grouper(key='Submit', freq=f)).describe()['WaitTime hours']
-    # f_na = x['mean'].isna()
-    # if f_na.any():
-    #   x = x[~f_na]
-    # # - Interquartile plot
-    # x = x[['mean', '25%', '75%', 'max']]
-    # mean_values = x['mean']
-    # q1_values = x['25%']
-    # q3_values = x['75%']
-    # # - calculate the interquartile range
-    # lower_error = np.clip(mean_values - q1_values, 0, None)
-    # upper_error = np.clip(q3_values - mean_values, 0, None)
-    # asymmetric_error = [lower_error, upper_error]
-    # # - create the plot
-    # fig = plt.figure(figsize=(14, 6))
-    # plt.errorbar(x.index, mean_values, yerr=asymmetric_error, fmt='none', label='IQR', capsize=5, color='blue')
-    # plt.scatter(x.index, mean_values, marker='_', color='red', label='Mean', zorder=5)
-    # # plt.scatter(x.index, x['max'], marker='_', color='blue', label='Max')
-    # plt.xlabel('Submit time')
-    # plt.ylabel('Wait duration (hours)')
-    # plt.title(f'Submit time vs wait time - partition {p}')
-    # plt.legend()
-    # # plt.show() ; quit()
-    # # plt_fp = os.path.join(plot_dp, f'submit-vs-wait-{p.upper()}.png')
-    # fn = 'wait-vs-submit.png'
-    # plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
-    # plt.savefig(plt_fp)
-    # plt.close(fig)
+    for load_metric in ['TotalCPU hours', 'MaxRSS TB hours']:
+      # Violin plot of binned wait times
+      df_plot = dfp[['Submit', 'WaitTime hours', 'WaitTime % limit', load_metric]].copy().set_index('Submit')
+      df_plot['WaitTime % limit'] = 100*df_plot['WaitTime % limit']
+      # Absolute wait time
+      if df_plot['WaitTime hours'].max() > 40:
+        fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric, yscaling='log')
+      elif df_plot['WaitTime hours'].max() > 40:
+        fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric, yscaling='sqrt')
+      else:  
+        fig, ag = plot_time_series_violins(df_plot, 'WaitTime hours', load_metric)
+      plt.xlabel('Week end')
+      plt.ylabel('Wait time (hours)')
+      plt.title(f'Wait time, weekly distributions, area ≈ {load_metric}, partition {p}')
+      # fn = 'wait-distribution-weekly.png'
+      if 'CPU' in load_metric:
+        fn = 'wait-distribution-weekly-(load-metric-CPU).png'
+      else:
+        fn = 'wait-distribution-weekly-(load-metric-mem).png'
+      plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+      plt.savefig(plt_fp)
+      plt.close(fig)
+      #
+      # Relative wait time (% of time-limit)
+      if df_plot['WaitTime % limit'].max() > 3000:
+        # Need more aggressive Y scaling
+        fig, ag = plot_time_series_violins(df_plot, 'WaitTime % limit', load_metric, yscaling='log')
+      else:
+        fig, ag = plot_time_series_violins(df_plot, 'WaitTime % limit', load_metric, yscaling='sqrt')
+      plt.xlabel('Week end')
+      plt.ylabel('Wait time % time limit')
+      #
+      plt.title(f'Wait time % job limit, weekly distributions, area ≈ {load_metric}, partition {p}')
+      # fn = 'wait-distribution-weekly-pct.png'
+      if 'CPU' in load_metric:
+        fn = 'wait-distribution-weekly-pct-(load-metric-CPU).png'
+      else:
+        fn = 'wait-distribution-weekly-pct-(load-metric-mem).png'
+      plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+      plt.savefig(plt_fp)
+      plt.close(fig)
 
 
     # Plot of resources waiting in queue
-    df_wait2 = dfp.rename(columns={'Start':'End'}).rename(columns={'Submit':'Start'})
+    df_wait2 = dfp.drop('End',axis=1).rename(columns={'Start':'End'}).rename(columns={'Submit':'Start'})
     # - CPUS
+    fig = plt.figure(figsize=(14, 8))
     ncpus_waiting = aggregate_resource(df_wait2, 'NCPUS', period=args.resolution)
     ncpus_waiting = pd.DataFrame(ncpus_waiting)
     for x in list(ncpus_waiting.columns):
       ncpus_waiting[f'{x} %'] = ncpus_waiting[f'{x}'] / total_cpus['*']
     # - time-series plot
-    fig = plt.figure(figsize=(14, 8))
     # Plot normal % chart
     y = ncpus_waiting['NCPUS_sum %']*100.0
-    # plt.plot(ncpus_waiting.index, y, label='Requested')
     plt.plot(ncpus_waiting.index, y, label='Requested', color='blue')
-    plt.fill_between(ncpus_waiting.index, y, alpha=0.3, color='blue')
     plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
     plt.ylabel(f'CPUs % partition')
     plt.title(f'CPUs waiting % partition "{p}" resources')
@@ -792,16 +894,16 @@ def fn_analyse_waiting(df):
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
+    #
     # - memory
+    fig = plt.figure(figsize=(14, 8))
     mem_waiting = aggregate_resource(df_wait2, 'ReqMemGB', period=args.resolution)
     mem_waiting = pd.DataFrame(mem_waiting)
     for x in list(mem_waiting.columns):
       mem_waiting[f'{x} %'] = mem_waiting[f'{x}'] / total_gb['*']
     # - time-series plot
-    fig = plt.figure(figsize=(14, 8))
     y = mem_waiting['ReqMemGB_sum %']*100.0
-    plt.plot(mem_waiting.index, y, label='Requested', color='orange')
-    plt.fill_between(mem_waiting.index, y, alpha=0.3, color='orange')
+    plt.plot(mem_waiting.index, y, label='Requested', color='blue')
     plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
     plt.ylabel(f'Memory waiting % partition')
     plt.title(f'Memory waiting % partition "{p}" resources')
@@ -811,6 +913,7 @@ def fn_analyse_waiting(df):
     plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
     plt.savefig(plt_fp)
     plt.close(fig)
+    
     # - combine
     cpus_mem_waiting = ncpus_waiting.join(mem_waiting)
     fig = plt.figure(figsize=(14, 8))
@@ -828,49 +931,90 @@ def fn_analyse_waiting(df):
     plt.savefig(plt_fp)
     plt.close(fig)
 
-  return
 
-  p = '*'
+    #############################################
+    # Plot wait time vs "recent use", to show QoS
+    ranges = []
+    ranges.append(('1T', 60))    # 1min interval, 1 hour
+    ranges.append(('5T', 12*4))  # 5min interval, 4 hours
+    for period, window in ranges:
+      dfpp = dfp.copy()
+      dfpp['Time floored'] = dfpp['Start'].dt.floor(period)
+      fc = [c for c in dfpp.columns if 'Time floored' in c][0]
+      lookback_compact_string = timedelta_to_compact_str(pd.Timedelta(period)*window)
 
-  ################################################################
-  # EXPERIMENTAL: TRY TO FIND A PLOT TO REPRESENT FAIRNESS
-  ################################################################
-  # period = 'H'   ; window = 6
-  # df_wait['Time floored 1h'] = df_wait['Submit'].dt.floor('1H')
-  # period = '15m' ; window = 4*6
-  # df_wait['Time floored 15m'] = df_wait['Submit'].dt.floor('15T')
-  # period = '5m'  ; window = 12*6
-  # df_wait['Time floored 5m'] = df_wait['Submit'].dt.floor('5T')
-  period = '1m'  ; window = 60
-  df_wait['Time floored 1m'] = df_wait['Submit'].dt.floor('1T')
+      dfpp['Recent use'] = np.nan
+      users = dfpp['User'].unique()
+      dfpp = dfpp.sort_values('Start')
+      for u in users:
+        df_wait_user = dfpp[dfpp['User']==u].drop('User', axis=1)
 
-  fc = [c for c in df_wait.columns if 'Time floored' in c][0]
-  df_wait['Recent use'] = np.nan
-  for u in df_wait['User'].unique():
-    df_wait_user = df_wait[df_wait['User']==u].drop('User', axis=1)
-    rcol_agg = aggregate_resource(df_wait_user, rcol, period=period)
-    df_wait_user_agg = pd.DataFrame(rcol_agg)
-    df_wait_user_agg['Recent use'] = df_wait_user_agg[rcol+'_sum'].rolling(window=window, min_periods=1).sum()
-    df_wait_user_agg = df_wait_user_agg.drop(rcol+'_sum', axis=1)
-    # Merge:
-    df_wait_user_agg.index.name = fc
-    df_wait_user_agg = df_wait_user_agg.reset_index()
-    df_wait_user_agg['User'] = u
-    merged = df_wait.merge(df_wait_user_agg, on=['User', fc], how='left')
-    c = 'Recent use'
-    f_na = df_wait[c].isna().to_numpy()
-    df_wait.loc[f_na, c] = merged[c+'_y'].to_numpy()[f_na]
-  df_wait = df_wait.sort_values('WaitTime hours')
-  fig = plt.figure(figsize=(16,10))
-  plt.scatter(df_wait['Recent use'], df_wait['WaitTime hours'], s=1,
-              c=df_wait['User'].astype('category').cat.codes, cmap='viridis')
-  plt.xlabel(f'Recent use: {rcol}')
-  plt.ylabel('Future wait hours')
-  fn = 'wait-vs-recent-use.png'
-  plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
-  plt.savefig(plt_fp)
-  plt.close(fig)
-  ################################################################
+        rcol_agg = aggregate_resource(df_wait_user, rcol, period=period)
+        df_wait_user_agg = pd.DataFrame(rcol_agg)
+        df_wait_user_agg['Recent use'] = df_wait_user_agg[rcol+'_sum'].rolling(window=window, min_periods=1).sum()
+        df_wait_user_agg['Recent use'] -= df_wait_user_agg[rcol+'_sum']
+        df_wait_user_agg['Recent use'] *= 1/(window-1)
+        df_wait_user_agg = df_wait_user_agg.drop(rcol+'_sum', axis=1)
+        # Merge:
+        df_wait_user_agg.index.name = fc
+        df_wait_user_agg = df_wait_user_agg.reset_index()
+        df_wait_user_agg['User'] = u
+        merged = dfpp.merge(df_wait_user_agg, on=['User', fc], how='left')
+        c = 'Recent use'
+        f_na = dfpp[c].isna().to_numpy()
+        dfpp.loc[f_na, c] = merged[c+'_y'].to_numpy()[f_na]
+      dfpp = dfpp[dfpp['WaitTime hours'] > (1/60)]  # at least 1 minute
+      if dfpp.empty:
+        continue
+
+      fna = dfpp['Recent use'].isna()
+      if fna.any():
+        # Actually expect a very tiny number to be NaN, because these
+        # are first jobs from user in time window.
+        # fna_pct = np.sum(fna) / len(dfpp)
+        # if fna_pct > 0.10:
+        #   raise Exception("Over 10% of values in column 'Recent use' are NaN")
+        dfpp = dfpp[~fna]
+        if dfpp.empty:
+          continue
+      if dfpp['WaitTime hours'].isna().any():
+        raise Exception("dfpp['WaitTime hours'] contains NaNs")
+
+      # Heatmap is primary visual
+      # cmap = 'viridis'
+      cmap = 'rainbow'
+      fig = plt.figure(figsize=(16,10))
+      x = dfpp['Recent use']
+      y = dfpp['WaitTime hours']
+      x_bins = np.linspace(x.min(), x.max(), 25)
+      yLog_bins = np.logspace(np.log10(y.min()), np.log10(y.max()), 25)
+      plt.hist2d(x, y, 
+                norm='log',
+                cmap=cmap,
+                bins=(x_bins, yLog_bins))
+      plt.colorbar(label='Num jobs')
+      plt.xlabel(f'Recent use in previous {lookback_compact_string}, metric = {rcol}')
+      # plt.ylabel('Wait hours')
+      plt.ylabel('Wait hours (log)') ; plt.yscale('log')
+      plt.title(f'Wait time vs resource use in previous {lookback_compact_string}, partition {p}')
+      fn = f'wait-vs-recent-use-{lookback_compact_string}.png'
+      plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+      plt.savefig(plt_fp)
+      plt.close(fig)
+
+      # Scatter plot may be useful to cross-check heatmap
+      fig = plt.figure(figsize=(16,10))
+      scatter = plt.scatter(dfpp['Recent use'], dfpp['WaitTime hours'], s=1,
+                  c=dfpp['User'].astype('category').cat.codes, cmap=cmap)
+      plt.xlabel(f'Recent use in previous {lookback_compact_string}, metric = {rcol}')
+      # plt.ylabel('Wait hours')
+      plt.ylabel('Wait hours (log)') ; plt.yscale('log')
+      plt.title(f'Wait time vs resource use in previous {lookback_compact_string}, partition {p}')
+      fn = f'wait-vs-recent-use-{lookback_compact_string}-scatter.png'
+      plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+      plt.savefig(plt_fp)
+      plt.close(fig)
+    ################################################################
 
   return
 
@@ -999,6 +1143,134 @@ def fn_analyse_waiting(df):
   plt.close(fig)
 
 
+def fn_analyse_waiting_yearly(df):
+  # Exclude jobs with artificial user-created delays
+  artificial_delays = {'Dependency', 'DependencyNeverSatisfied', 'BeginTime', 'JobHeldUser', 'ReqNodeNotAvail'}
+  f_user_delay = (df['Reason'].isin(artificial_delays)).to_numpy()
+  if f_user_delay.any():
+    # print(f"Dropping {np.sum(f_user_delay)}/{df.shape[0]} jobs as these had artificial delay caused by user")
+    df = df[~f_user_delay].copy()
+
+  df_wait = df[['Submit', 'Start', 'Partition', 'WaitTime hours', 'WaitTime % limit', 'NCPUS', 'ReqMemGB', 'TotalCPU hours', 'Elapsed hours']].copy()
+
+  df_wait['TB*CPU'] = df_wait['ReqMemGB'] * 0.001 * df_wait['NCPUS']
+  rcol = 'TB*CPU'
+
+  # Time-series for each partition
+  # for p in [args.partition] if args.partition else partitions:
+  for p in [args.partition] if args.partition else partitions+['*']:
+    dfp = df_wait.copy() if p == '*' else df_wait[df_wait['Partition']==p].copy()
+    dfp = dfp[(dfp['WaitTime hours']>0) & (dfp['WaitTime hours']<48)]
+    if dfp.empty:
+      continue
+    if p == '*':
+      print(f"Analysing wait time yearly across all partitions")
+    else:
+      print(f"Analysing wait time yearly in partition '{p}'")
+
+    load_metric = 'TotalCPU hours'
+
+    # Plot of resources waiting in queue
+    df_wait2 = dfp.rename(columns={'Start':'End'}).rename(columns={'Submit':'Start'})
+    years = range(df_wait2['Start'].min().year, df_wait2['End'].max().year+1)
+    last_year = years[-1]
+    # - CPUS
+    fig = plt.figure(figsize=(14, 8))
+    for year in years:
+      df_year = df_wait2[df_wait2['Start'].dt.year == year].copy()
+      # print(f"- df year={year}:") ; print(df_year)
+      ncpus_waiting = aggregate_resource(df_year, 'NCPUS', period=args.resolution)
+      # if ncpus_waiting is None:
+      #   continue
+      ncpus_waiting = pd.DataFrame(ncpus_waiting)
+      if year != last_year:
+        ncpus_waiting.index += pd.Timedelta(days=365*(last_year-year))
+      for x in list(ncpus_waiting.columns):
+        ncpus_waiting[f'{x} %'] = ncpus_waiting[f'{x}'] / total_cpus['*']
+      # - time-series plot
+      # Plot normal % chart
+      y = ncpus_waiting['NCPUS_sum %']*100.0
+      plt.plot(ncpus_waiting.index, y, label=year)
+    plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
+    plt.ylabel(f'CPUs % partition')
+    plt.title(f'CPUs waiting % partition "{p}" resources')
+    plt.xlabel('Date')
+    plt.legend()
+    fn = 'waiting-cpus-pct-yearly.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
+    #
+    # - memory
+    fig = plt.figure(figsize=(14, 8))
+    for year in years:
+      df_year = df_wait2[df_wait2['Start'].dt.year == year].copy()
+      mem_waiting = aggregate_resource(df_year, 'ReqMemGB', period=args.resolution)
+      mem_waiting = pd.DataFrame(mem_waiting)
+      if year != last_year:
+        mem_waiting.index += pd.Timedelta(days=365*(last_year-year))
+      for x in list(mem_waiting.columns):
+        mem_waiting[f'{x} %'] = mem_waiting[f'{x}'] / total_gb['*']
+      # - time-series plot
+      y = mem_waiting['ReqMemGB_sum %']*100.0
+      plt.plot(mem_waiting.index, y, label=year)
+    plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
+    plt.ylabel(f'Memory waiting % partition')
+    plt.title(f'Memory waiting % partition "{p}" resources')
+    plt.xlabel('Date')
+    plt.legend()
+    fn = 'waiting-mem-pct-yearly.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
+
+  return
+
+  p = '*'
+
+  ################################################################
+  # EXPERIMENTAL: TRY TO FIND A PLOT TO REPRESENT FAIRNESS
+  ################################################################
+  # period = 'H'   ; window = 6
+  # df_wait['Time floored 1h'] = df_wait['Submit'].dt.floor('1H')
+  # period = '15m' ; window = 4*6
+  # df_wait['Time floored 15m'] = df_wait['Submit'].dt.floor('15T')
+  # period = '5m'  ; window = 12*6
+  # df_wait['Time floored 5m'] = df_wait['Submit'].dt.floor('5T')
+  period = '1m'  ; window = 60
+  df_wait['Time floored 1m'] = df_wait['Submit'].dt.floor('1T')
+
+  fc = [c for c in df_wait.columns if 'Time floored' in c][0]
+  df_wait['Recent use'] = np.nan
+  for u in df_wait['User'].unique():
+    df_wait_user = df_wait[df_wait['User']==u].drop('User', axis=1)
+    rcol_agg = aggregate_resource(df_wait_user, rcol, period=period)
+    df_wait_user_agg = pd.DataFrame(rcol_agg)
+    df_wait_user_agg['Recent use'] = df_wait_user_agg[rcol+'_sum'].rolling(window=window, min_periods=1).sum()
+    df_wait_user_agg = df_wait_user_agg.drop(rcol+'_sum', axis=1)
+    # Merge:
+    df_wait_user_agg.index.name = fc
+    df_wait_user_agg = df_wait_user_agg.reset_index()
+    df_wait_user_agg['User'] = u
+    merged = df_wait.merge(df_wait_user_agg, on=['User', fc], how='left')
+    c = 'Recent use'
+    f_na = df_wait[c].isna().to_numpy()
+    df_wait.loc[f_na, c] = merged[c+'_y'].to_numpy()[f_na]
+  df_wait = df_wait.sort_values('WaitTime hours')
+  fig = plt.figure(figsize=(16,10))
+  plt.scatter(df_wait['Recent use'], df_wait['WaitTime hours'], s=1,
+              c=df_wait['User'].astype('category').cat.codes, cmap='viridis')
+  plt.xlabel(f'Recent use: {rcol}')
+  plt.ylabel('Future wait hours')
+  fn = 'wait-vs-recent-use.png'
+  plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+  plt.savefig(plt_fp)
+  plt.close(fig)
+  ################################################################
+
+  return
+
+
 def fn_analyse_users(df):
   df['Elapsed hours'] = df['Elapsed'].dt.total_seconds()/3600
   df['CPU hours'] = df['TotalCPU'].dt.total_seconds()/3600
@@ -1009,12 +1281,9 @@ def fn_analyse_users(df):
   df_plt = df[['User', 'Partition', 'Submit', 'GB hours', 'CPU hours', 'Elapsed hours']]
 
   for p in [args.partition] if args.partition else partitions+['*']:
-    if p == '*':
-      df_plt_p = df_plt
-    else:
-      df_plt_p = df_plt[df_plt['Partition']==p]
-      if df_plt_p.empty:
-        continue
+    df_plt_p = df_plt if p == '*' else df_plt[df_plt['Partition']==p]
+    if df_plt_p.empty:
+      continue
     df_plt_p = df_plt_p.drop('Partition', axis=1)
     if p == '*':
       print(f"Analysing users across all partitions")
@@ -1152,12 +1421,16 @@ def fn_analyse_job_runtimes(df):
 
 if args.resources:
   fn_analyse_resources(df)
+  if args.annual:
+    fn_analyse_resources_yearly(df_sliced_yearly)
 
 if args.waits:
   fn_analyse_waiting(df)
+  if args.annual:
+    fn_analyse_waiting_yearly(df_sliced_yearly)
 
 if args.users:
-  # fn_analyse_users(df)
+  fn_analyse_users(df)
   fn_analyse_job_runtimes(df)
 
 ##
