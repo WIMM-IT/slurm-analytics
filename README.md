@@ -46,6 +46,7 @@ This saves the parsed data, as Python pickled Pandas DataFrames, in local folder
 Python requirements:
 - pandas
 - numpy
+- GitPython
 
 ## Step 3: analyse
 
