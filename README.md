@@ -35,7 +35,7 @@ that saves node resource information into `Dumps/<cluster-name>/resources/`.
 
 `sacct` output is parsed using the parser taken from [AWS's HPC Cost Simulator](https://github.com/aws-samples/hpc-cost-simulator):
 
-    https://github.com/aowenson-imm/hpc-cost-simulator/tree/slurm-sacct-parser
+    git clone https://github.com/aowenson-imm/hpc-cost-simulator
 
 `git clone` my fork, add the parent folder to `PYTHONPATH`, then run:
 
