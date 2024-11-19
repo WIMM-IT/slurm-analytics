@@ -8,23 +8,37 @@ from utils import get_cluster_name
 
 def expand_node_ranges(node_range):
     nodes = []
-    ranges = node_range.split(',')
-    for r in ranges:
-        if '[' in r and ']' in r:
-            prefix = r.split('[')[0]
-            range_part = r.split('[')[1].split(']')[0]
-            for part in range_part.split(','):
-                if '-' in part:
-                    start, end = part.split('-')
-                    nodes.extend([f"{prefix}{i}" for i in range(int(start), int(end)+1)])
-                else:
-                    nodes.append(f"{prefix}{part}")
-        else:
-            nodes.append(r)
+
+    tokens = re.findall(r'([^,\[]+(?:\[[^\]]+\])?)', node_range)
+    for token in tokens:
+        match = re.match(r'([^[]+)(?:\[([^\]]+)\])?$', token.strip())
+        if not match:
+            continue
+        prefix, ranges = match.groups()
+
+        if ranges is None:
+            nodes.append(prefix)
+            continue
+
+        for range_part in ranges.split(','):
+            # Single number
+            if re.match(r'^\d+$', range_part):
+                num = range_part
+                width = max((len(r.split('-')[0]) for r in ranges.split(',')), default=len(num))
+                nodes.append("{}{}".format(prefix, num.zfill(width)))
+                continue
+
+            # Number range
+            range_match = re.match(r'(\d+)-(\d+)', range_part)
+            if range_match:
+                start, end = map(int, range_match.groups())
+                width = len(range_match.group(1))
+                nodes += ("{}{}".format(prefix, str(i).zfill(width)) 
+                             for i in range(start, end + 1))
     return nodes
 
 def get_node_info():
-    node_info = subprocess.check_output(['scontrol', 'show', 'nodes'], text=True)
+    node_info = subprocess.check_output(['scontrol', 'show', 'nodes']).decode('ascii')
     nodes = {}
     current_node = None
     
@@ -47,16 +61,18 @@ def get_node_info():
             if 'Gres=' in line and 'Gres=(null)' not in line:
                 match = re.search(r"Gres=(gpu:[^\s]+)", line)
                 gpu_info_items = match.group(1).split(':')
-                # Until I see real examples otherwise, assume syntax is:
-                # gpu:[model]:[count]
-                model = gpu_info_items[1]
-                count = int(gpu_info_items[2])
+                if len(gpu_info_items) == 2:
+                    model = '?'
+                    count = int(gpu_info_items[1])
+                else:
+                    model = gpu_info_items[1]
+                    count = int(gpu_info_items[2])
                 nodes[current_node]['GPUs'] = [model, count]
     
     return nodes
 
 def get_partition_info():
-    partition_info = subprocess.check_output(['scontrol', 'show', 'partition'], text=True)
+    partition_info = subprocess.check_output(['scontrol', 'show', 'partition']).decode('ascii')
     partitions = {}
     current_partition = None
     
@@ -139,7 +155,7 @@ if not os.path.isdir(d):
     os.makedirs(d)
 dt = datetime.date.today()
 nodes = get_node_info()
-fp = os.path.join('Dumps', get_cluster_name(), 'resources', f'nodes-{str(dt)}.json')
+fp = os.path.join('Dumps', get_cluster_name(), 'resources', 'nodes-{}.json'.format(str(dt)))
 if not os.path.isfile(fp):
     try:
         with open(fp, 'w') as f:
@@ -151,7 +167,7 @@ if not os.path.isfile(fp):
 
 partitions = get_partition_info()
 partitions = prune_nodes(partitions, nodes)
-fp = os.path.join('Dumps', get_cluster_name(), 'resources', f'partitions-{str(dt)}.json')
+fp = os.path.join('Dumps', get_cluster_name(), 'resources', 'partitions-{}.json'.format(str(dt)))
 if not os.path.isfile(fp):
     try:
         with open(fp, 'w') as f:
