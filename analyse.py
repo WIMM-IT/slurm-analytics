@@ -36,6 +36,8 @@ parser.add_argument('-t', '--resolution', type=str, default='D', choices=['H', '
 parser.add_argument('-d', '--plots-dir', type=str, default='Plots', help='Save plots here instead of "Plots/"')
 args = parser.parse_args()
 cluster_id = args.cluster_name
+if args.resolution is not None and args.resolution == 'H':
+  args.resolution = 'h'
 plot_dp = os.path.join(args.plots_dir, cluster_id)
 
 if not args.resources and not args.waits and not args.users:
@@ -165,7 +167,26 @@ def aggregate_resource(df, x, period='H', cache=True):
       if cache_mod_dt > input_mod_dt:
         # Reuse cache
         with open(cache_path, 'rb') as f:
-            return pkl.load(f)
+          df = pkl.load(f)
+        if args.weeks:
+          cutoff_dt = df.index.max() - pd.Timedelta(weeks=args.weeks)
+          if args.annual:
+            # Need a N-week slice from each year, not just this year
+            year_start = df.index.min().year
+            year_end = df.index.max().year
+            slices = []
+            years = range(year_start, year_end+1)
+            for year in sorted(years, reverse=True):
+              cutoff_dt_year = cutoff_dt - pd.Timedelta(days=365*(year_end-year))
+              f = (df.index>=cutoff_dt_year) & (df.index<(cutoff_dt_year+pd.Timedelta(weeks=args.weeks)))
+              s = df[f]
+              slices.append(s)
+            df = pd.concat(slices)
+            df = df.sort_index()
+            return df
+          else:
+            return df.loc[cutoff_dt:]
+        return df
 
   fna = df[x].isna()
   if fna.any():
@@ -178,17 +199,17 @@ def aggregate_resource(df, x, period='H', cache=True):
     freq = '1D'
   elif period == 'W':
     freq = '1W'
-  elif period in ['H', '1H']:
-    freq = '1H'
-  elif period in ['15m', '15T']:
-    freq = '15T'
-    rounding = 'H'
-  elif period in ['5m', '5T']:
-    freq = '5T'
-    rounding = 'H'
-  elif period in ['1m', '1T']:
-    freq = '1T'
-    rounding = 'H'
+  elif period in ['H', '1H', 'h', '1h']:
+    freq = '1h'
+  elif period in ['15m', '15T', '15min']:
+    freq = '15min'
+    rounding = 'h'
+  elif period in ['5m', '5T', '5min']:
+    freq = '5min'
+    rounding = 'h'
+  elif period in ['1m', '1T', '1min']:
+    freq = '1min'
+    rounding = 'h'
   else:
     raise Exception(f"Not implemented period='{period}'")
   if rounding is None:
@@ -387,6 +408,22 @@ def aggregate_resource(df, x, period='H', cache=True):
     with open(cache_path, 'wb') as f:
       pkl.dump(agg, f)
 
+  if args.weeks:
+    cutoff_dt = agg.index.max() - pd.Timedelta(weeks=args.weeks)
+    if args.annual:
+      # Need a N-week slice from each year, not just this year
+      year_start = agg.index.min().year
+      year_end = agg.index.max().year
+      slices = []
+      years = range(year_start, year_end+1)
+      for year in sorted(years, reverse=True):
+        cutoff_dt_year = cutoff_dt - pd.Timedelta(days=365*(year_end-year))
+        f = (agg.index>=cutoff_dt_year) & (agg.index<(cutoff_dt_year+pd.Timedelta(weeks=args.weeks)))
+        s = agg[f]
+        slices.append(s)
+      return pd.concat(slices).sort_index()
+    else:
+      return agg.loc[cutoff_dt:]
   return agg
 
 
@@ -1009,8 +1046,8 @@ def fn_analyse_waiting(df):
     #############################################
     # Plot wait time vs "recent use", to show QoS
     ranges = []
-    ranges.append(('1T', 60))    # 1min interval, 1 hour
-    ranges.append(('5T', 12*4))  # 5min interval, 4 hours
+    ranges.append(('1min', 60))    # 1min interval, 1 hour
+    ranges.append(('5min', 12*4))  # 5min interval, 4 hours
     for period, window in ranges:
       dfpp = dfp.copy()
       dfpp['Time floored'] = dfpp['Start'].dt.floor(period)
