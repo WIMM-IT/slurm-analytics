@@ -8,6 +8,7 @@ Analyse Slurm sacct data with Python Pandas.
   - CPU consumption and % utilisation
   - Memory consumption and % utilisation
   - user breakdown of "resource waste"
+  - NEW: memory churn, a proxy for data throughput
 
 - wait times. Does cluster have enough resources for demand?
   - weekly distribution of job wait times [as % of job time limit]

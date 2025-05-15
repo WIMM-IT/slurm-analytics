@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
 import matplotlib
+import matplotlib.cm as cm
+# import matplotlib.colormaps as cm
 plt.rcParams['figure.autolayout'] = True  # auto tight layout
 # marker = 'x'
 marker = '.'
@@ -31,7 +33,7 @@ parser.add_argument('-w', '--waits',      action='store_true', help='Analyse wai
 parser.add_argument('-u', '--users',      action='store_true', help='Analyse users')
 parser.add_argument('-p', '--partition',  type=str, default=None, help='Analyse just this Slurm partition')
 parser.add_argument('-a', '--annual',     action='store_true', help='Compare years (only some charts supported)')
-parser.add_argument('-n', '--weeks',      type=int, default=None, help='Analyse just last N weeks')
+parser.add_argument('-n', '--weeks',      type=int, choices=range(1, 52), default=None, help='Analyse just last N weeks')
 parser.add_argument('-t', '--resolution', type=str, default='D', choices=['H', 'D', 'W'], help='Aggregation resolution time period, default: %(default)s')
 parser.add_argument('-d', '--plots-dir', type=str, default='Plots', help='Save plots here instead of "Plots/"')
 args = parser.parse_args()
@@ -39,6 +41,10 @@ cluster_id = args.cluster_name
 if args.resolution is not None and args.resolution == 'H':
   args.resolution = 'h'
 plot_dp = os.path.join(args.plots_dir, cluster_id)
+
+if args.annual and not args.weeks:
+  # Need weeks
+  args.weeks = 52
 
 if not args.resources and not args.waits and not args.users:
   print("You did not specify an analysis")
@@ -145,7 +151,7 @@ if args.weeks:
 
 # This is the critical magic function, for combining all jobs in df
 # to a single time-series.
-def aggregate_resource(df, x, period='H', cache=True):
+def aggregate_resource(df, x, period='H', cache=True, churn=False):
   # Map job-start-time to a short intervals. Similarly for job-end.
   if not isinstance(df, pd.DataFrame):
     raise ValueError(f'"df" must be a Pandas DataFrame not {type(df)}')
@@ -157,7 +163,10 @@ def aggregate_resource(df, x, period='H', cache=True):
   if cache:
     cache_dir = "Cache"
     x_hash = hashlib.sha256(df[x].values.tobytes()).hexdigest()[:16]
-    cache_key = f"{x.replace(' ', '_')}_{period}_{x_hash}"
+    cache_key = f"{x}_{period}_{x_hash}"
+    if churn:
+      cache_key += f"_churn"
+    cache_key = cache_key.replace(' ', '_').replace('/', '')
     cache_path = os.path.join(cache_dir, cache_key+".pkl")
     os.makedirs(cache_dir, exist_ok=True)
     if os.path.isfile(cache_path):
@@ -294,18 +303,28 @@ def aggregate_resource(df, x, period='H', cache=True):
   # 1) handle start & end intervals for each job.
   # 1a) calculate % of start & end intervals that job consumed
   f = (df['Start_Idx'] == df['End_Idx']).to_numpy()
+
+  # Definition of overlap depends on "churn"
   if f.any():
     # Some jobs ran within a single interval so can't assume these will touch interval boundaries.
     df['StartOverlap%'] = 0.0 ; df['EndOverlap%'] = 0.0
-    df.loc[f,'StartOverlap%'] = (df.loc[f,'End'] - df.loc[f,'Start']) / itd
-
     # But for all other jobs, these span at least 2 intervals so they cross interval boundaries.
     fn = ~f
-    df.loc[fn, 'StartOverlap%'] = (df.loc[fn, 'Start_IntEnd'] - df.loc[fn, 'Start']) / itd
-    df.loc[fn, 'EndOverlap%'] = (df.loc[fn, 'End'] - df.loc[fn, 'End_IntStart']) / itd
+    if churn:
+      denom = df.loc[fn, 'Elapsed']
+      df.loc[f,'StartOverlap%'] = 1.0
+    else:
+      denom = itd
+      df.loc[f,'StartOverlap%'] = (df.loc[f,'End'] - df.loc[f,'Start']) / itd
+    df.loc[fn, 'StartOverlap%'] = (df.loc[fn, 'Start_IntEnd'] - df.loc[fn, 'Start']) / denom
+    df.loc[fn, 'EndOverlap%'] = (df.loc[fn, 'End'] - df.loc[fn, 'End_IntStart']) / denom
   else:
-    df['StartOverlap%'] = (df['Start_IntEnd'] - df['Start']) / itd
-    df['EndOverlap%'] = (df['End'] - df['End_IntStart']) / itd
+    if churn:
+      denom = df['Elapsed']
+    else:
+      denom = itd
+    df['StartOverlap%'] = (df['Start_IntEnd'] - df['Start']) / denom
+    df['EndOverlap%'] = (df['End'] - df['End_IntStart']) / denom
   # 1b) used above % to distribute resource use across interval
   if x == 'N':
     # special:
@@ -315,10 +334,10 @@ def aggregate_resource(df, x, period='H', cache=True):
     df[f'Start_Int_{x}'] = df[x] * df['StartOverlap%']
     df[f'End_Int_{x}'] = df[x] * df['EndOverlap%']
   agg_start = df.groupby('Start_IntStart').agg(
-      xsum=pd.NamedAgg(column=f'Start_Int_{x}', aggfunc='sum')
+    xsum=pd.NamedAgg(column=f'Start_Int_{x}', aggfunc='sum')
   )
   agg_end = df.groupby('End_IntStart').agg(
-      xsum=pd.NamedAgg(column=f'End_Int_{x}', aggfunc='sum')
+    xsum=pd.NamedAgg(column=f'End_Int_{x}', aggfunc='sum')
   )
   agg_start.index.names = ['IntStart']
   agg_start = agg_start['xsum']
@@ -332,42 +351,11 @@ def aggregate_resource(df, x, period='H', cache=True):
   f = df['End_Idx'] > (df['Start_Idx']+1)
   if f.any():
     inner_df = df[f].copy()  # massive perf improvement for coarse aggregation (most jobs in 1 interval)
-    # inner_df = df.copy()
     inner_df['Inner_StartIdx'] = inner_df['Start_Idx'] + 1
     inner_df['Inner_EndIdx'] = inner_df['End_Idx'] - 1
-
     agg_backup = agg.copy()
 
-    # # Have to manually iterate over each job, but use indices to optimise updating sum.
-    # inner_df = inner_df.sort_values('Elapsed')  # why?
-    # # for i in range(inner_df.shape[0]):
-    # import tqdm
-    # from time import perf_counter as pc
-    # t = tqdm.tqdm(range(inner_df.shape[0]))
-    # t.set_description(f'Aggregating {x} ...')
-    # t0 = pc()
-    # for i in t:
-    #   dfi = inner_df.iloc[i]
-    #   # if x != 'N' and np.isnan(dfi[x]):
-    #   #   print(dfi)
-    #   #   raise Exception(f'NaNs detected at i={i}')
-    #   # Update: exception has not triggered for long time.
-    #   start = dfi['Inner_StartIdx']
-    #   end = dfi['Inner_EndIdx']
-    #   if start > end:
-    #     # ToDo: this could be most jobs, so potential performance optimisation here
-    #     continue
-    #   startidx = agg.index[start]
-    #   endidx = agg.index[end]
-    #   if x == 'N':
-    #     agg.loc[startidx:endidx] += 1.0
-    #   else:
-    #     agg.loc[startidx:endidx] += dfi[x]
-    # t1 = pc()
-    # print(f"- old time = {t1-t0:.2} seconds")
-
     # Optimised with Numba:
-    # t0 = pc()
     @jit(nopython=True)
     def process_inner_intervals(start_idx_values, end_idx_values, x_values, agg_values):
       for i in range(len(start_idx_values)):
@@ -379,27 +367,26 @@ def aggregate_resource(df, x, period='H', cache=True):
     Inner_StartIdx_values = inner_df['Inner_StartIdx'].to_numpy()
     Inner_EndIdx_values = inner_df['Inner_EndIdx'].to_numpy()
     if x == 'N':
-        x_values = np.ones(len(inner_df))
+      x_values = np.ones(len(inner_df))
     else:
-        x_values = inner_df[x].to_numpy()
-    # agg_values = agg.to_numpy()
+      x_values = inner_df[x].to_numpy()
+    if churn:
+      # rate per interval
+      x_values *= (itd / inner_df['Elapsed']).to_numpy()
     agg_values = agg_backup.to_numpy()
-    # print(f'Aggregating {x} (period={period})')
     agg_values2 = process_inner_intervals(Inner_StartIdx_values, 
                                           Inner_EndIdx_values, 
                                           x_values, 
                                           agg_values)
-    # agg2 = pd.Series(index=time_index, data=agg_values2)
-    # t1 = pc()
-    # print(f"- JIT time = {t1-t0:.2} seconds")
-    # print("- agg2.equals(agg) =", agg2.equals(agg))
-    # if not agg2.equals(agg):
-    #   raise Exception("JIT output is different")
-    # else:
-    #   print("GOOD, JIT matches")
     agg = pd.Series(index=time_index, data=agg_values2)
 
-  agg.name = f'{x}_sum'
+  if churn:
+    # At this point, values are churn per interval.
+    # Convert to churn per second
+    agg *= 1 / itd.total_seconds()
+    agg.name = f'{x}_churn/sec'
+  else:
+    agg.name = f'{x}_sum'
 
   agg = agg.sort_index()
 
@@ -816,6 +803,31 @@ def fn_analyse_resources(df):
       plt.close(fig)
 
 
+
+def plot_series_years(x):
+  years = range(x.index.min().year, x.index.max().year+1)
+  last_year = years[-1]
+  theme = 'cool'
+  # cmap = cm.get_cmap(theme, len(years))
+  cmap = plt.get_cmap(theme, len(years))
+  for i, year in enumerate(sorted(years)):
+    N=len(years)
+    color = cmap(0.5) if N == 1 else cmap(i / (N-1))
+
+    xy = x.loc[f'{year}-01-01':f'{year}-12-31'].copy()
+    if year != last_year:
+      xy.index += pd.Timedelta(days=365*(last_year-year))
+    f_jump = xy.index.diff() > pd.Timedelta(days=30)
+    if f_jump.any():
+      idx = np.where(f_jump)[0][0]
+      xy1 = xy.iloc[:idx]
+      xy2 = xy.iloc[idx:]
+      line1, = plt.plot(xy1.index, xy1, label=year, color=color)
+      plt.plot(xy2.index, xy2, color=color)
+    else:
+      plt.plot(xy.index, xy, label=year, color=color)
+
+
 def fn_analyse_resources_yearly(df):
   for p in [args.partition] if args.partition else partitions+['*']:
     df_plt = df.copy() if p == '*' else df[df['Partition']==p].copy()
@@ -829,9 +841,27 @@ def fn_analyse_resources_yearly(df):
     rss = aggregate_resource(df_plt, 'MaxRSS GB', args.resolution)
     req = aggregate_resource(df_plt, 'ReqMemGB', args.resolution)
     df_mem = pd.DataFrame(rss).join(req)
+    df_mem['Mem wasted'] = df_mem['ReqMemGB_sum'] - df_mem['MaxRSS GB_sum']
     for x in list(df_mem.columns):
       df_mem[f'{x} %'] = df_mem[f'{x}'] / total_gb[p]
-    df_mem['Mem wasted'] = df_mem['ReqMemGB_sum'] - df_mem['MaxRSS GB_sum']
+
+    # Calculate overall average GB/sec, weighted by job size
+    mem_churn = df_plt[['MaxRSS GB', 'Elapsed', 'Start', 'End']].copy()
+    mem_churn_agg = aggregate_resource(mem_churn, 'MaxRSS GB', args.resolution, churn=True)
+    mem_churn_agg.name = 'GB/sec'
+    mem_churn_agg = pd.DataFrame(mem_churn_agg)
+    x = mem_churn_agg['GB/sec']
+    years = range(mem_churn_agg.index.min().year, mem_churn_agg.index.max().year+1)
+    fig = plt.figure(figsize=(18, 8))
+    plot_series_years(mem_churn_agg['GB/sec'])
+    plt.xlabel('Time')
+    plt.ylabel(f'Memory churn GB/sec')
+    plt.title(f'Memory churn GB/sec - partition {p}')
+    plt.legend()
+    fn = 'resource-churn-memory-yearly.png'
+    plt_fp = os.path.join(plot_dp, '' if p=='*' else p.upper(), fn)
+    plt.savefig(plt_fp)
+    plt.close(fig)
 
     cpu_col = 'NCPUS_real'
     real = aggregate_resource(df_plt, cpu_col, args.resolution)
@@ -845,15 +875,8 @@ def fn_analyse_resources_yearly(df):
     df_sys_waste['Mem wasted %'] = df_sys_waste['Mem wasted'] / total_gb[p]
     df_sys_waste['CPU wasted %'] = df_sys_waste['CPU wasted'] / total_cpus[p]
 
-    years = range(df_sys_waste.index.min().year, df_sys_waste.index.max().year+1)
-    last_year = years[-1]
-
     fig = plt.figure(figsize=(18, 8))
-    for year in sorted(years, reverse=True):
-      df_year = df_sys_waste.loc[f'{year}-01-01':f'{year}-12-31'].copy()
-      if year != last_year:
-        df_year.index += pd.Timedelta(days=365*(last_year-year))
-      plt.plot(df_year.index, df_year['MaxRSS GB_sum %']*100.0, label=year)
+    plot_series_years(df_sys_waste['MaxRSS GB_sum %']*100)
     plt.xlabel('Time')
     plt.ylabel(f'Memory use %')
     plt.title(f'Memory use - partition {p}')
@@ -864,11 +887,7 @@ def fn_analyse_resources_yearly(df):
     plt.close(fig)
 
     fig = plt.figure(figsize=(18, 8))
-    for year in sorted(years, reverse=True):
-      df_year = df_sys_waste.loc[f'{year}-01-01':f'{year}-12-31'].copy()
-      if year != last_year:
-        df_year.index += pd.Timedelta(days=365*(last_year-year))
-      plt.plot(df_year.index, df_year['Mem wasted %']*100.0, label=year)
+    plot_series_years(df_sys_waste['Mem wasted %']*100)
     plt.xlabel('Time')
     plt.ylabel(f'Memory waste %')
     plt.title(f'Memory waste - partition {p}')
@@ -879,11 +898,7 @@ def fn_analyse_resources_yearly(df):
     plt.close(fig)
 
     fig = plt.figure(figsize=(18, 8))
-    for year in sorted(years, reverse=True):
-      df_year = df_sys_waste.loc[f'{year}-01-01':f'{year}-12-31'].copy()
-      if year != last_year:
-        df_year.index += pd.Timedelta(days=365*(last_year-year))
-      plt.plot(df_year.index, df_year['NCPUS_real_sum %']*100.0, label=year)
+    plot_series_years(df_sys_waste['NCPUS_real_sum %']*100)
     plt.xlabel('Time')
     plt.ylabel(f'CPU use %')
     plt.title(f'CPU use - partition {p}')
@@ -894,11 +909,7 @@ def fn_analyse_resources_yearly(df):
     plt.close(fig)
 
     fig = plt.figure(figsize=(18, 8))
-    for year in sorted(years, reverse=True):
-      df_year = df_sys_waste.loc[f'{year}-01-01':f'{year}-12-31'].copy()
-      if year != last_year:
-        df_year.index += pd.Timedelta(days=365*(last_year-year))
-      plt.plot(df_year.index, df_year['CPU wasted %']*100.0, label=year)
+    plot_series_years(df_sys_waste['CPU wasted %']*100)
     plt.xlabel('Time')
     plt.ylabel(f'CPU waste %')
     plt.title(f'CPU waste - partition {p}')
@@ -1341,21 +1352,12 @@ def fn_analyse_waiting_yearly(df):
     last_year = years[-1]
     # - CPUS
     fig = plt.figure(figsize=(14, 8))
-    for year in sorted(years, reverse=True):
-      df_year = df_wait2[df_wait2['Start'].dt.year == year].copy()
-      # print(f"- df year={year}:") ; print(df_year)
-      ncpus_waiting = aggregate_resource(df_year, 'NCPUS', period=args.resolution)
-      # if ncpus_waiting is None:
-      #   continue
-      ncpus_waiting = pd.DataFrame(ncpus_waiting)
-      if year != last_year:
-        ncpus_waiting.index += pd.Timedelta(days=365*(last_year-year))
-      for x in list(ncpus_waiting.columns):
-        ncpus_waiting[f'{x} %'] = ncpus_waiting[f'{x}'] / total_cpus['*']
-      # - time-series plot
-      # Plot normal % chart
-      y = ncpus_waiting['NCPUS_sum %']*100.0
-      plt.plot(ncpus_waiting.index, y, label=year)
+    ncpus_waiting = aggregate_resource(df_wait2, 'NCPUS', period=args.resolution)
+    ncpus_waiting = pd.DataFrame(ncpus_waiting)
+    for x in list(ncpus_waiting.columns):
+      ncpus_waiting[f'{x} %'] = ncpus_waiting[f'{x}'] / total_cpus['*']
+    y = ncpus_waiting['NCPUS_sum %']*100.0
+    plot_series_years(y)
     plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
     plt.ylabel(f'CPUs % partition')
     plt.title(f'CPUs waiting % partition "{p}" resources')
@@ -1368,17 +1370,12 @@ def fn_analyse_waiting_yearly(df):
     #
     # - memory
     fig = plt.figure(figsize=(14, 8))
-    for year in sorted(years, reverse=True):
-      df_year = df_wait2[df_wait2['Start'].dt.year == year].copy()
-      mem_waiting = aggregate_resource(df_year, 'ReqMemGB', period=args.resolution)
-      mem_waiting = pd.DataFrame(mem_waiting)
-      if year != last_year:
-        mem_waiting.index += pd.Timedelta(days=365*(last_year-year))
-      for x in list(mem_waiting.columns):
-        mem_waiting[f'{x} %'] = mem_waiting[f'{x}'] / total_gb['*']
-      # - time-series plot
-      y = mem_waiting['ReqMemGB_sum %']*100.0
-      plt.plot(mem_waiting.index, y, label=year)
+    mem_waiting = aggregate_resource(df_wait2, 'ReqMemGB', period=args.resolution)
+    mem_waiting = pd.DataFrame(mem_waiting)
+    for x in list(mem_waiting.columns):
+      mem_waiting[f'{x} %'] = mem_waiting[f'{x}'] / total_gb['*']
+    y = mem_waiting['ReqMemGB_sum %']*100.0
+    plot_series_years(y)
     plt.ylim(0, min(400, y.max()))  # cap otherwise chart is not readable
     plt.ylabel(f'Memory waiting % partition')
     plt.title(f'Memory waiting % partition "{p}" resources')
